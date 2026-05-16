@@ -1,0 +1,24 @@
+# Terraform
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform.lock.hcl
+**/tfplan
+**/*.tfplan
+**/crash.log
+**/crash.*.log
+
+# Secrets
+**/credentials
+**/config
+**/.aws/
+**/*.pem
+**/*.key
+
+# Logs
+**/*.log
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
