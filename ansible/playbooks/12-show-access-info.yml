@@ -1,0 +1,39 @@
+---
+- name: Show Digipipeline access information
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Get app ALB hostname
+      ansible.builtin.shell: |
+        kubectl -n demo-app get ingress demo-app-ingress \
+          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true
+      register: alb_hostname
+      changed_when: false
+
+    - name: Get Argo CD admin password
+      ansible.builtin.shell: |
+        kubectl -n argocd get secret argocd-initial-admin-secret \
+          -o jsonpath='{.data.password}' | base64 -d
+      register: argocd_password
+      changed_when: false
+
+    - name: Get Grafana admin password
+      ansible.builtin.shell: |
+        kubectl -n monitoring get secret kube-prometheus-stack-grafana \
+          -o jsonpath='{.data.admin-password}' | base64 -d
+      register: grafana_password
+      changed_when: false
+
+    - name: Print access information
+      ansible.builtin.debug:
+        msg:
+          - "APP URL: http://{{ alb_hostname.stdout }}"
+          - "ARGO CD URL: https://localhost:8080"
+          - "ARGO CD USERNAME: admin"
+          - "ARGO CD PASSWORD: {{ argocd_password.stdout }}"
+          - "GRAFANA URL: http://localhost:3000"
+          - "GRAFANA USERNAME: admin"
+          - "GRAFANA PASSWORD: {{ grafana_password.stdout }}"
+          - "SSH TUNNEL:"
+          - "ssh -i {{ bastion_key_path }} -L 8080:localhost:8080 -L 3000:localhost:3000 ubuntu@{{ bastion_public_ip }}"
