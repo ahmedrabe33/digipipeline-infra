@@ -1,0 +1,53 @@
+---
+- name: Install or verify Argo CD on private EKS through Bastion
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.command: >
+        aws eks update-kubeconfig
+        --region {{ aws_region }}
+        --name {{ cluster_name }}
+      changed_when: false
+
+    - name: Add Argo CD Helm repo
+      ansible.builtin.command: helm repo add argo https://argoproj.github.io/argo-helm
+      register: argo_repo
+      changed_when: "'has been added' in argo_repo.stdout"
+      failed_when:
+        - argo_repo.rc != 0
+        - "'already exists' not in argo_repo.stderr"
+
+    - name: Update Helm repos
+      ansible.builtin.command: helm repo update
+      changed_when: false
+
+    - name: Install or upgrade Argo CD
+      ansible.builtin.command: >
+        helm upgrade --install argocd argo/argo-cd
+        --namespace argocd
+        --create-namespace
+        --set server.service.type=ClusterIP
+        --wait
+        --timeout 10m
+      register: argocd_install
+      changed_when: "'has been upgraded' in argocd_install.stdout or 'has been installed' in argocd_install.stdout"
+
+    - name: Get Argo CD pods
+      ansible.builtin.command: kubectl get pods -n argocd
+      changed_when: false
+      register: argocd_pods
+
+    - name: Show Argo CD pods
+      ansible.builtin.debug:
+        var: argocd_pods.stdout_lines
+
+    - name: Get Argo CD services
+      ansible.builtin.command: kubectl get svc -n argocd
+      changed_when: false
+      register: argocd_svc
+
+    - name: Show Argo CD services
+      ansible.builtin.debug:
+        var: argocd_svc.stdout_lines

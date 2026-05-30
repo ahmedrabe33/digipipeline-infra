@@ -1,0 +1,11 @@
+aws_region: "us-east-1"
+cluster_name: "devops-ha-eks"
+vpc_id: "vpc-064fed861bdea01c9"
+
+karpenter_controller_role_arn: "arn:aws:iam::429104603739:role/KarpenterControllerRole-devops-ha-eks"
+karpenter_node_role_name: "devops-ha-eks-node-role"
+
+install_argocd: true
+install_aws_lbc: false
+install_karpenter: false
+install_monitoring: false

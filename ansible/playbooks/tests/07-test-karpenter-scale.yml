@@ -1,0 +1,83 @@
+---
+- name: Test Karpenter node provisioning
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Create workload that must run on Karpenter nodes
+      ansible.builtin.shell: |
+        cat <<MANIFEST | kubectl apply -f -
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: karpenter-test
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: karpenter-nginx
+          namespace: karpenter-test
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: karpenter-nginx
+          template:
+            metadata:
+              labels:
+                app: karpenter-nginx
+            spec:
+              nodeSelector:
+                nodepool: karpenter
+              containers:
+                - name: nginx
+                  image: nginx:stable
+                  resources:
+                    requests:
+                      cpu: "500m"
+                      memory: "512Mi"
+                  ports:
+                    - containerPort: 80
+        MANIFEST
+      args:
+        executable: /bin/bash
+
+    - name: Show pending pods
+      ansible.builtin.command: kubectl -n karpenter-test get pods -o wide
+      changed_when: false
+      register: pods_before
+
+    - name: Print pods before scaling
+      ansible.builtin.debug:
+        var: pods_before.stdout_lines
+
+    - name: Wait for Karpenter to create node and schedule pods
+      ansible.builtin.command: kubectl -n karpenter-test rollout status deployment/karpenter-nginx --timeout=600s
+      changed_when: false
+
+    - name: Show nodes after Karpenter scaling
+      ansible.builtin.command: kubectl get nodes -o wide
+      changed_when: false
+      register: nodes_after
+
+    - name: Print nodes after scaling
+      ansible.builtin.debug:
+        var: nodes_after.stdout_lines
+
+    - name: Show Karpenter NodeClaims and NodePools
+      ansible.builtin.command: kubectl get nodeclaim,nodepool
+      changed_when: false
+      register: karpenter_status
+
+    - name: Print Karpenter status
+      ansible.builtin.debug:
+        var: karpenter_status.stdout_lines
+
+    - name: Show test pods
+      ansible.builtin.command: kubectl -n karpenter-test get pods -o wide
+      changed_when: false
+      register: pods_after
+
+    - name: Print test pods
+      ansible.builtin.debug:
+        var: pods_after.stdout_lines

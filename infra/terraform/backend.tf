@@ -6,7 +6,6 @@ terraform {
     dynamodb_table = "devops-ha-eks-tf-locks"
     encrypt        = true
 
-    profile                  = "rabie"
-    shared_credentials_files = ["credentials"]
+    profile = "default"
   }
 }

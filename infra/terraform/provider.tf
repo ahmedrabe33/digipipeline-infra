@@ -16,8 +16,6 @@ terraform {
 
 
 provider "aws" {
-  region                   = var.aws_region
-  shared_credentials_files = ["credentials"]
-  shared_config_files      = ["config"]
-  profile                  = "rabie"
+  region  = var.aws_region
+  profile = "default"
 }

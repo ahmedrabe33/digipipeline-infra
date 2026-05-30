@@ -1,0 +1,37 @@
+---
+- name: Cleanup Karpenter test workload
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Delete Karpenter test namespace
+      ansible.builtin.command: kubectl delete namespace karpenter-test --ignore-not-found=true
+      register: delete_output
+      changed_when: "'deleted' in delete_output.stdout"
+
+    - name: Show delete result
+      ansible.builtin.debug:
+        var: delete_output.stdout_lines
+
+    - name: Wait for Karpenter consolidation
+      ansible.builtin.pause:
+        seconds: 120
+
+    - name: Show nodes after cleanup
+      ansible.builtin.command: kubectl get nodes -o wide
+      changed_when: false
+      register: nodes_after_cleanup
+
+    - name: Print nodes after cleanup
+      ansible.builtin.debug:
+        var: nodes_after_cleanup.stdout_lines
+
+    - name: Show NodeClaims after cleanup
+      ansible.builtin.command: kubectl get nodeclaim
+      changed_when: false
+      register: nodeclaims_after_cleanup
+      failed_when: false
+
+    - name: Print NodeClaims after cleanup
+      ansible.builtin.debug:
+        var: nodeclaims_after_cleanup.stdout_lines

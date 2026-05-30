@@ -1,0 +1,105 @@
+---
+- name: Test AWS Load Balancer Controller with ALB Ingress
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Create test app with Service and ALB Ingress
+      ansible.builtin.shell: |
+        cat <<MANIFEST | kubectl apply -f -
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: alb-test
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: nginx
+          namespace: alb-test
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: nginx
+          template:
+            metadata:
+              labels:
+                app: nginx
+            spec:
+              containers:
+                - name: nginx
+                  image: nginx:stable
+                  ports:
+                    - containerPort: 80
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: nginx-service
+          namespace: alb-test
+        spec:
+          type: ClusterIP
+          selector:
+            app: nginx
+          ports:
+            - port: 80
+              targetPort: 80
+        ---
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: nginx-ingress
+          namespace: alb-test
+          annotations:
+            alb.ingress.kubernetes.io/scheme: internet-facing
+            alb.ingress.kubernetes.io/target-type: ip
+            alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+        spec:
+          ingressClassName: alb
+          rules:
+            - http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: nginx-service
+                        port:
+                          number: 80
+        MANIFEST
+      args:
+        executable: /bin/bash
+
+    - name: Wait for app pods
+      ansible.builtin.command: kubectl -n alb-test rollout status deployment/nginx --timeout=180s
+      changed_when: false
+
+    - name: Show test resources
+      ansible.builtin.command: kubectl -n alb-test get deploy,svc,ingress,pods -o wide
+      changed_when: false
+      register: alb_test_output
+
+    - name: Print test resources
+      ansible.builtin.debug:
+        var: alb_test_output.stdout_lines
+
+    - name: Wait for ALB hostname
+      ansible.builtin.shell: |
+        for i in {1..30}; do
+          HOSTNAME=$(kubectl -n alb-test get ingress nginx-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+          if [ -n "$HOSTNAME" ]; then
+            echo "ALB_HOSTNAME=$HOSTNAME"
+            exit 0
+          fi
+          echo "Waiting for ALB hostname... $i"
+          sleep 20
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      register: alb_hostname
+
+    - name: Show ALB hostname
+      ansible.builtin.debug:
+        var: alb_hostname.stdout_lines

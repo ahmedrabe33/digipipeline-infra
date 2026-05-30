@@ -1,0 +1,39 @@
+---
+- name: Verify private EKS cluster from Bastion
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.command: >
+        aws eks update-kubeconfig
+        --region {{ aws_region }}
+        --name {{ cluster_name }}
+      changed_when: false
+
+    - name: Get EKS nodes
+      ansible.builtin.command: kubectl get nodes -o wide
+      changed_when: false
+      register: nodes_output
+
+    - name: Show nodes
+      ansible.builtin.debug:
+        var: nodes_output.stdout_lines
+
+    - name: Get all pods
+      ansible.builtin.command: kubectl get pods -A
+      changed_when: false
+      register: pods_output
+
+    - name: Show pods
+      ansible.builtin.debug:
+        var: pods_output.stdout_lines
+
+    - name: Get Helm releases
+      ansible.builtin.command: helm list -A
+      changed_when: false
+      register: helm_output
+
+    - name: Show Helm releases
+      ansible.builtin.debug:
+        var: helm_output.stdout_lines

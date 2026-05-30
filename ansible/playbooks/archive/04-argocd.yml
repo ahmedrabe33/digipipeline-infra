@@ -1,0 +1,19 @@
+---
+- name: Install Argo CD
+  hosts: dev
+  gather_facts: false
+
+  tasks:
+    - name: Install Argo CD using Helm
+      ansible.builtin.shell: |
+        helm repo add argo https://argoproj.github.io/argo-helm || true
+        helm repo update
+        helm upgrade --install argocd argo/argo-cd \
+          --namespace argocd \
+          --create-namespace \
+          --set server.service.type=ClusterIP \
+          --wait \
+          --timeout 10m
+      args:
+        executable: /bin/bash
+      when: install_argocd | bool

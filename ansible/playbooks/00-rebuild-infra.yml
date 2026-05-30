@@ -1,0 +1,203 @@
+---
+- name: Rebuild Terraform infrastructure and update Ansible inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    project_root: "/home/ahmedrabie/Documents/devops-production-platform"
+    terraform_dir: "/home/ahmedrabie/Documents/devops-production-platform/infra/terraform"
+    ansible_dir: "/home/ahmedrabie/Documents/devops-production-platform/ansible"
+    aws_profile: "default"
+    aws_region: "us-east-1"
+    key_name: "devops-ha-eks-bastion-key"
+    key_path: "/home/ahmedrabie/.ssh/devops-ha-eks-bastion-key.pem"
+
+  tasks:
+    - name: Check local SSH private key exists
+      ansible.builtin.stat:
+        path: "{{ key_path }}"
+      register: bastion_key
+
+    - name: Stop if SSH private key is missing
+      ansible.builtin.fail:
+        msg: "Missing SSH key: {{ key_path }}"
+      when: not bastion_key.stat.exists
+
+    - name: Get AWS account ID
+      ansible.builtin.command: >
+        aws sts get-caller-identity
+        --profile {{ aws_profile }}
+        --query Account
+        --output text
+      register: account_id_output
+      changed_when: false
+
+    - name: Check AWS EC2 key pair
+      ansible.builtin.command: >
+        aws ec2 describe-key-pairs
+        --region {{ aws_region }}
+        --profile {{ aws_profile }}
+        --key-names {{ key_name }}
+      register: keypair_check
+      changed_when: false
+      failed_when: false
+
+    - name: Import EC2 key pair if missing
+      ansible.builtin.shell: |
+        set -e
+        ssh-keygen -y -f "{{ key_path }}" > /tmp/{{ key_name }}.pub
+
+        aws ec2 import-key-pair \
+          --region {{ aws_region }} \
+          --profile {{ aws_profile }} \
+          --key-name {{ key_name }} \
+          --public-key-material fileb:///tmp/{{ key_name }}.pub
+      args:
+        executable: /bin/bash
+      when: keypair_check.rc != 0
+
+    - name: Get current public IP
+      ansible.builtin.shell: curl -s https://checkip.amazonaws.com | tr -d '\n'
+      register: my_public_ip
+      changed_when: false
+
+    - name: Update my_ip_cidr in terraform.tfvars
+      ansible.builtin.lineinfile:
+        path: "{{ terraform_dir }}/terraform.tfvars"
+        regexp: '^my_ip_cidr\s*='
+        line: 'my_ip_cidr = "{{ my_public_ip.stdout }}/32"'
+
+    - name: Update key_name in terraform.tfvars
+      ansible.builtin.lineinfile:
+        path: "{{ terraform_dir }}/terraform.tfvars"
+        regexp: '^key_name\s*='
+        line: 'key_name = "{{ key_name }}"'
+
+    - name: Terraform init
+      ansible.builtin.command: terraform init -reconfigure
+      args:
+        chdir: "{{ terraform_dir }}"
+
+    - name: Terraform fmt
+      ansible.builtin.command: terraform fmt -recursive
+      args:
+        chdir: "{{ terraform_dir }}"
+
+    - name: Terraform validate
+      ansible.builtin.command: terraform validate
+      args:
+        chdir: "{{ terraform_dir }}"
+
+    - name: Terraform apply
+      ansible.builtin.command: terraform apply -auto-approve
+      args:
+        chdir: "{{ terraform_dir }}"
+
+    - name: Read Terraform outputs as JSON
+      ansible.builtin.command: terraform output -json
+      args:
+        chdir: "{{ terraform_dir }}"
+      register: tf_output
+      changed_when: false
+
+    - name: Set Terraform output facts
+      ansible.builtin.set_fact:
+        tf: "{{ tf_output.stdout | from_json }}"
+        aws_account_id: "{{ account_id_output.stdout }}"
+
+    - name: Update Ansible hosts.ini with new Bastion IP
+      ansible.builtin.copy:
+        dest: "{{ ansible_dir }}/inventories/dev/hosts.ini"
+        content: |
+          [bastion]
+          devops-bastion ansible_host={{ tf.bastion_public_ip.value }} ansible_user=ubuntu ansible_ssh_private_key_file={{ key_path }}
+
+    - name: Update Ansible all.yml with new Terraform outputs
+      ansible.builtin.copy:
+        dest: "{{ ansible_dir }}/inventories/dev/group_vars/all.yml"
+        content: |
+          aws_profile: "{{ aws_profile }}"
+          aws_region: "{{ aws_region }}"
+          aws_account_id: "{{ aws_account_id }}"
+
+          cluster_name: "{{ tf.cluster_name.value }}"
+          vpc_id: "{{ tf.vpc_id.value }}"
+
+          bastion_public_ip: "{{ tf.bastion_public_ip.value }}"
+          bastion_private_ip: "{{ tf.bastion_private_ip.value }}"
+          bastion_key_path: "{{ key_path }}"
+
+          aws_lbc_policy_name: "AWSLoadBalancerControllerIAMPolicy-{{ tf.cluster_name.value }}"
+          aws_lbc_role_name: "AmazonEKSLoadBalancerControllerRole-{{ tf.cluster_name.value }}"
+          aws_lbc_namespace: "kube-system"
+          aws_lbc_service_account_name: "aws-load-balancer-controller"
+
+          karpenter_namespace: "kube-system"
+          karpenter_service_account_name: "karpenter"
+          karpenter_controller_role_arn: "{{ tf.karpenter_controller_role_arn.value }}"
+          karpenter_node_role_name: "{{ tf.karpenter_node_role_name.value }}"
+          karpenter_ec2nodeclass_name: "default"
+          karpenter_nodepool_name: "default"
+
+    - name: Add new Bastion to temporary inventory
+      ansible.builtin.add_host:
+        name: devops-bastion
+        groups: rebuilt_bastion
+        ansible_host: "{{ tf.bastion_public_ip.value }}"
+        ansible_user: ubuntu
+        ansible_ssh_private_key_file: "{{ key_path }}"
+
+    - name: Wait for SSH on Bastion
+      ansible.builtin.wait_for:
+        host: "{{ tf.bastion_public_ip.value }}"
+        port: 22
+        timeout: 300
+
+    - name: Wait for Ansible connection to Bastion
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      delegate_to: devops-bastion
+
+    - name: Wait for Bastion user_data tools
+      ansible.builtin.shell: |
+        for i in {1..60}; do
+          command -v aws >/dev/null 2>&1 && \
+          command -v kubectl >/dev/null 2>&1 && \
+          command -v helm >/dev/null 2>&1 && exit 0
+          echo "Waiting for aws/kubectl/helm... $i"
+          sleep 10
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      delegate_to: devops-bastion
+      changed_when: false
+
+    - name: Configure kubeconfig on Bastion
+      ansible.builtin.command: >
+        aws eks update-kubeconfig
+        --region {{ aws_region }}
+        --name {{ tf.cluster_name.value }}
+      delegate_to: devops-bastion
+      changed_when: false
+
+    - name: Verify EKS nodes from Bastion with retries
+      ansible.builtin.command: kubectl get nodes -o wide
+      delegate_to: devops-bastion
+      register: nodes_output
+      changed_when: false
+      retries: 20
+      delay: 30
+      until: nodes_output.rc == 0
+
+    - name: Show nodes
+      ansible.builtin.debug:
+        var: nodes_output.stdout_lines
+
+    - name: Show next command
+      ansible.builtin.debug:
+        msg:
+          - "Infrastructure is ready."
+          - "Bastion IP: {{ tf.bastion_public_ip.value }}"
+          - "Next: cd {{ ansible_dir }} && ansible-playbook playbooks/10-install-platform.yml"

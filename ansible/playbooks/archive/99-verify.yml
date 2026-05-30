@@ -1,0 +1,17 @@
+---
+- name: Verify cluster preparation
+  hosts: dev
+  gather_facts: false
+
+  tasks:
+    - name: Get nodes
+      ansible.builtin.command: kubectl get nodes -o wide
+      changed_when: false
+
+    - name: Get pods
+      ansible.builtin.command: kubectl get pods -A
+      changed_when: false
+
+    - name: Get Helm releases
+      ansible.builtin.command: helm list -A
+      changed_when: false

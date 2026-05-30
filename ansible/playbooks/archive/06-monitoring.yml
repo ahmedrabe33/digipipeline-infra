@@ -1,0 +1,19 @@
+---
+- name: Install Prometheus and Grafana
+  hosts: dev
+  gather_facts: false
+
+  tasks:
+    - name: Install kube-prometheus-stack using Helm
+      ansible.builtin.shell: |
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+        helm repo update
+        helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+          --namespace monitoring \
+          --create-namespace \
+          --set grafana.service.type=ClusterIP \
+          --wait \
+          --timeout 15m
+      args:
+        executable: /bin/bash
+      when: install_monitoring | bool

@@ -1,0 +1,23 @@
+---
+- name: Delete temporary ALB Ingress test
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Delete alb-test namespace
+      ansible.builtin.command: kubectl delete namespace alb-test --ignore-not-found=true
+      register: delete_output
+      changed_when: "'deleted' in delete_output.stdout"
+
+    - name: Show delete result
+      ansible.builtin.debug:
+        var: delete_output.stdout_lines
+
+    - name: Check remaining ingresses
+      ansible.builtin.command: kubectl get ingress -A
+      changed_when: false
+      register: ingress_output
+
+    - name: Show remaining ingresses
+      ansible.builtin.debug:
+        var: ingress_output.stdout_lines

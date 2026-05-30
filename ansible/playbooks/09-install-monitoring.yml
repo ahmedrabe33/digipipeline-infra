@@ -1,0 +1,67 @@
+---
+- name: Install Prometheus and Grafana on EKS through Bastion
+  hosts: bastion
+  gather_facts: false
+
+  tasks:
+    - name: Add Prometheus community Helm repo
+      ansible.builtin.command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      register: prom_repo
+      changed_when: "'has been added' in prom_repo.stdout"
+      failed_when:
+        - prom_repo.rc != 0
+        - "'already exists' not in prom_repo.stderr"
+
+    - name: Update Helm repos
+      ansible.builtin.command: helm repo update
+      changed_when: false
+
+    - name: Install or upgrade kube-prometheus-stack
+      ansible.builtin.shell: |
+        helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+          --namespace monitoring \
+          --create-namespace \
+          --set grafana.service.type=ClusterIP \
+          --set grafana.adminPassword='admin123' \
+          --set prometheus.prometheusSpec.retention=6h \
+          --set prometheus.prometheusSpec.resources.requests.cpu=200m \
+          --set prometheus.prometheusSpec.resources.requests.memory=512Mi \
+          --set prometheus.prometheusSpec.resources.limits.cpu=500m \
+          --set prometheus.prometheusSpec.resources.limits.memory=1Gi \
+          --set alertmanager.enabled=false \
+          --wait \
+          --timeout 15m
+      args:
+        executable: /bin/bash
+      register: monitoring_install
+
+    - name: Show Helm result
+      ansible.builtin.debug:
+        var: monitoring_install.stdout_lines
+
+    - name: Verify monitoring pods
+      ansible.builtin.command: kubectl get pods -n monitoring -o wide
+      changed_when: false
+      register: monitoring_pods
+
+    - name: Show monitoring pods
+      ansible.builtin.debug:
+        var: monitoring_pods.stdout_lines
+
+    - name: Verify monitoring services
+      ansible.builtin.command: kubectl get svc -n monitoring
+      changed_when: false
+      register: monitoring_svc
+
+    - name: Show monitoring services
+      ansible.builtin.debug:
+        var: monitoring_svc.stdout_lines
+
+    - name: Verify Helm releases
+      ansible.builtin.command: helm list -n monitoring
+      changed_when: false
+      register: helm_releases
+
+    - name: Show Helm releases
+      ansible.builtin.debug:
+        var: helm_releases.stdout_lines
