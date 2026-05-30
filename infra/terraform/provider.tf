@@ -19,3 +19,8 @@ provider "aws" {
   region  = var.aws_region
   profile = "default"
 }
+provider "aws" {
+  alias   = "ci"
+  region  = var.jenkins_aws_region
+  profile = "default"
+}

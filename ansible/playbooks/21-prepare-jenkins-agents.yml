@@ -1,0 +1,70 @@
+---
+- name: Prepare Jenkins SSH agents
+  hosts: jenkins_agents
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Install required packages on agents
+      ansible.builtin.dnf:
+        name:
+          - java-17-amazon-corretto-headless
+          - docker
+          - git
+          - awscli
+        state: present
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Create jenkins user
+      ansible.builtin.user:
+        name: jenkins
+        shell: /bin/bash
+        groups: docker
+        append: true
+        create_home: true
+
+    - name: Create .ssh directory for jenkins user
+      ansible.builtin.file:
+        path: /home/jenkins/.ssh
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: "0700"
+
+    - name: Copy EC2 authorized_keys to jenkins user
+      ansible.builtin.copy:
+        src: /home/ec2-user/.ssh/authorized_keys
+        dest: /home/jenkins/.ssh/authorized_keys
+        remote_src: true
+        owner: jenkins
+        group: jenkins
+        mode: "0600"
+
+    - name: Allow jenkins user passwordless sudo
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/jenkins
+        content: "jenkins ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+
+    - name: Verify Java
+      ansible.builtin.command: java -version
+      register: java_check
+      changed_when: false
+
+    - name: Verify Docker
+      ansible.builtin.command: docker --version
+      register: docker_check
+      changed_when: false
+
+    - name: Show agent readiness
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }} is ready"
+          - "{{ docker_check.stdout }}"

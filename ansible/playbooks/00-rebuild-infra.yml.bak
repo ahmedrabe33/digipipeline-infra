@@ -161,17 +161,12 @@
 
     - name: Add new Bastion to temporary inventory
       ansible.builtin.add_host:
-        name: devops-bastion
-        groups:
-          - bastion
-          - runtime_bastion
+        name: bastion_runtime
+        groups: runtime_bastion
         ansible_host: "{{ tf.bastion_public_ip.value }}"
-        ansible_connection: ssh
         ansible_user: ubuntu
-        ansible_ssh_user: ubuntu
-        ansible_remote_user: ubuntu
         ansible_ssh_private_key_file: "{{ key_path }}"
-        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
         ansible_python_interpreter: /usr/bin/python3
 
 
@@ -180,30 +175,26 @@
         host: "{{ tf.bastion_public_ip.value }}"
         port: 22
         timeout: 300
-        delay: 10
-      delegate_to: localhost
 
     - name: Wait for Ansible connection to Bastion
       ansible.builtin.wait_for_connection:
         timeout: 300
-        delay: 10
-      delegate_to: devops-bastion
-      remote_user: ubuntu
+      delegate_to: bastion_runtime
 
     - name: Wait for Bastion user_data tools
       ansible.builtin.shell: |
-        set -e
-        command -v aws
-        command -v kubectl
+        for i in {1..60}; do
+          command -v aws >/dev/null 2>&1 && \
+          command -v kubectl >/dev/null 2>&1 && \
+          command -v helm >/dev/null 2>&1 && exit 0
+          echo "Waiting for aws/kubectl/helm... $i"
+          sleep 10
+        done
+        exit 1
       args:
         executable: /bin/bash
-      register: bastion_tools
+      delegate_to: bastion_runtime
       changed_when: false
-      retries: 30
-      delay: 10
-      until: bastion_tools.rc == 0
-      delegate_to: devops-bastion
-      remote_user: ubuntu
 
     - name: Configure kubeconfig on Bastion
       ansible.builtin.shell: |
@@ -225,14 +216,8 @@
         kubectl --kubeconfig "$HOME/.kube/config" config current-context
       args:
         executable: /bin/bash
-      register: kubeconfig_result
       changed_when: false
-      delegate_to: devops-bastion
-      remote_user: ubuntu
-
-    - name: Show kubeconfig user
-      ansible.builtin.debug:
-        var: kubeconfig_result.stdout_lines
+      delegate_to: bastion_runtime
 
     - name: Verify EKS nodes from Bastion
       ansible.builtin.shell: |
@@ -244,11 +229,7 @@
         executable: /bin/bash
       register: eks_nodes
       changed_when: false
-      retries: 12
-      delay: 10
-      until: eks_nodes.rc == 0
-      delegate_to: devops-bastion
-      remote_user: ubuntu
+      delegate_to: bastion_runtime
 
     - name: Show EKS nodes
       ansible.builtin.debug:

@@ -1,0 +1,32 @@
+aws_profile: "default"
+aws_region: "us-east-1"
+aws_account_id: "429104603739"
+
+cluster_name: "devops-ha-eks"
+vpc_id: "vpc-09018af8199698289"
+
+bastion_public_ip: "44.199.207.93"
+bastion_private_ip: "10.0.10.32"
+bastion_key_path: "/home/ahmedrabie/.ssh/devops-ha-eks-bastion-key.pem"
+
+ecr_repository_name: "digipipeline-app"
+ecr_repository_url: "429104603739.dkr.ecr.us-east-1.amazonaws.com/digipipeline-app"
+
+jenkins_url: "http://35.92.1.242:8080"
+jenkins_controller_public_ip: "35.92.1.242"
+jenkins_controller_private_ip: "10.20.10.109"
+jenkins_agent_private_ips:
+  - "10.20.10.191"
+  - "10.20.20.49"
+
+aws_lbc_policy_name: "AWSLoadBalancerControllerIAMPolicy-devops-ha-eks"
+aws_lbc_role_name: "AmazonEKSLoadBalancerControllerRole-devops-ha-eks"
+aws_lbc_namespace: "kube-system"
+aws_lbc_service_account_name: "aws-load-balancer-controller"
+
+karpenter_namespace: "kube-system"
+karpenter_service_account_name: "karpenter"
+karpenter_controller_role_arn: "arn:aws:iam::429104603739:role/KarpenterControllerRole-devops-ha-eks"
+karpenter_node_role_name: "devops-ha-eks-node-role"
+karpenter_ec2nodeclass_name: "default"
+karpenter_nodepool_name: "default"

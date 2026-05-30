@@ -1,9 +1,0 @@
----
-- import_playbook: 00-check-tools.yml
-- import_playbook: 01-kubeconfig.yml
-- import_playbook: 02-namespaces.yml
-- import_playbook: 03-metrics-server.yml
-- import_playbook: 04-argocd.yml
-- import_playbook: 05-aws-load-balancer-controller.yml
-- import_playbook: 06-monitoring.yml
-- import_playbook: 99-verify.yml

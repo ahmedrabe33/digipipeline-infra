@@ -1,0 +1,2 @@
+[bastion]
+devops-bastion ansible_host=BASTION_PUBLIC_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/devops-ha-eks-bastion-key.pem

@@ -1,0 +1,25 @@
+---
+- name: Show Jenkins and ECR information
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Read Jenkins initial admin password
+      ansible.builtin.shell: |
+        docker exec jenkins-controller cat /var/jenkins_home/secrets/initialAdminPassword 2>/dev/null || true
+      register: jenkins_password
+      changed_when: false
+
+    - name: Show CI information
+      ansible.builtin.debug:
+        msg:
+          - "Jenkins URL: {{ jenkins_url }}"
+          - "Jenkins Username: admin"
+          - "Jenkins Initial Password: {{ jenkins_password.stdout }}"
+          - "ECR Repository Name: {{ ecr_repository_name }}"
+          - "ECR Repository URL: {{ ecr_repository_url }}"
+          - "Jenkins Controller Public IP: {{ jenkins_controller_public_ip }}"
+          - "Jenkins Agent Private IPs: {{ jenkins_agent_private_ips }}"
+          - "In Jenkins, add SSH agents using user: jenkins"
+          - "Use your private key: ~/.ssh/devops-ha-eks-bastion-key.pem"

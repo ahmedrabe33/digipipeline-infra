@@ -1,0 +1,64 @@
+---
+- name: Install Jenkins controller on EC2
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.dnf:
+        name:
+          - docker
+          - git
+          - awscli
+        state: present
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Create Jenkins home directory
+      ansible.builtin.file:
+        path: /var/jenkins_home
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0755"
+
+    - name: Run Jenkins controller container
+      ansible.builtin.shell: |
+        docker rm -f jenkins-controller 2>/dev/null || true
+
+        docker run -d \
+          --name jenkins-controller \
+          --restart unless-stopped \
+          -p 8080:8080 \
+          -p 50000:50000 \
+          -v /var/jenkins_home:/var/jenkins_home \
+          jenkins/jenkins:lts
+      args:
+        executable: /bin/bash
+
+    - name: Wait for Jenkins initial password
+      ansible.builtin.shell: |
+        for i in {1..60}; do
+          docker exec jenkins-controller test -f /var/jenkins_home/secrets/initialAdminPassword && exit 0
+          sleep 10
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Read Jenkins initial admin password
+      ansible.builtin.command: docker exec jenkins-controller cat /var/jenkins_home/secrets/initialAdminPassword
+      register: jenkins_password
+      changed_when: false
+
+    - name: Show Jenkins access
+      ansible.builtin.debug:
+        msg:
+          - "Jenkins URL: {{ jenkins_url }}"
+          - "Initial Admin Password: {{ jenkins_password.stdout }}"

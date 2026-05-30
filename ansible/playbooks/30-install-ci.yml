@@ -1,0 +1,4 @@
+---
+- import_playbook: 20-install-jenkins-controller.yml
+- import_playbook: 21-prepare-jenkins-agents.yml
+- import_playbook: 22-show-ci-info.yml
