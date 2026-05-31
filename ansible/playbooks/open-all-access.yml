@@ -1,0 +1,152 @@
+---
+- name: Start Kubernetes dashboard port-forwards on Bastion
+  hosts: bastion
+  gather_facts: false
+
+  vars:
+    argocd_namespace: argocd
+    monitoring_namespace: monitoring
+    argocd_local_port: 8080
+    prometheus_local_port: 9090
+
+  tasks:
+    - name: Stop old Argo CD port-forward if exists
+      ansible.builtin.shell: |
+        pgrep -f "[k]ubectl.*port-forward.*argocd-server.*{{ argocd_local_port }}" | xargs -r kill || true
+      changed_when: false
+      failed_when: false
+
+    - name: Stop old Prometheus port-forward if exists
+      ansible.builtin.shell: |
+        pgrep -f "[k]ubectl.*port-forward.*{{ prometheus_local_port }}" | xargs -r kill || true
+      changed_when: false
+      failed_when: false
+
+    - name: Start Argo CD port-forward on Bastion
+      ansible.builtin.shell: |
+        nohup kubectl --kubeconfig "$HOME/.kube/config" \
+          -n {{ argocd_namespace }} \
+          port-forward svc/argocd-server {{ argocd_local_port }}:443 \
+          --address 127.0.0.1 \
+          > /tmp/argocd-port-forward.log 2>&1 &
+        sleep 3
+      changed_when: false
+
+    - name: Find Prometheus service
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n {{ monitoring_namespace }} \
+          get svc -o name | grep -E 'kube-prometheus-stack-prometheus|prometheus-operated' | head -n 1
+      register: prometheus_service
+      changed_when: false
+
+    - name: Start Prometheus port-forward on Bastion
+      ansible.builtin.shell: |
+        nohup kubectl --kubeconfig "$HOME/.kube/config" \
+          -n {{ monitoring_namespace }} \
+          port-forward {{ prometheus_service.stdout }} {{ prometheus_local_port }}:9090 \
+          --address 127.0.0.1 \
+          > /tmp/prometheus-port-forward.log 2>&1 &
+        sleep 3
+      changed_when: false
+
+    - name: Get Argo CD admin password
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n {{ argocd_namespace }} \
+          get secret argocd-initial-admin-secret \
+          -o jsonpath='{.data.password}' | base64 -d
+      register: argocd_password
+      changed_when: false
+
+
+- name: Get Jenkins access information
+  hosts: jenkins_controller
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Check Jenkins service status
+      ansible.builtin.shell: |
+        systemctl is-active jenkins || true
+      register: jenkins_status
+      changed_when: false
+
+    - name: Get Jenkins initial admin password if exists
+      ansible.builtin.shell: |
+        if [ -f /var/lib/jenkins/secrets/initialAdminPassword ]; then
+          cat /var/lib/jenkins/secrets/initialAdminPassword
+        else
+          echo "Initial password file not found. Jenkins may already be configured."
+        fi
+      register: jenkins_password
+      changed_when: false
+
+
+- name: Open local SSH tunnels for Argo CD, Prometheus, and Jenkins
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    argocd_local_port: 8080
+    prometheus_local_port: 9090
+    jenkins_local_port: 8082
+
+  tasks:
+    - name: Set inventory host variables
+      ansible.builtin.set_fact:
+        bastion_host_name: "{{ groups['bastion'][0] }}"
+        jenkins_host_name: "{{ groups['jenkins_controller'][0] }}"
+
+    - name: Set access facts
+      ansible.builtin.set_fact:
+        bastion_ip: "{{ hostvars[bastion_host_name].ansible_host }}"
+        jenkins_ip: "{{ hostvars[jenkins_host_name].ansible_host }}"
+        bastion_key: "{{ hostvars[bastion_host_name].ansible_ssh_private_key_file | default('/home/ahmedrabie/.ssh/devops-ha-eks-bastion-key.pem') }}"
+        jenkins_key: "{{ hostvars[jenkins_host_name].ansible_ssh_private_key_file | default('/home/ahmedrabie/.ssh/devops-ha-eks-bastion-key.pem') }}"
+
+    - name: Stop old local SSH tunnels if exists
+      ansible.builtin.shell: |
+        pgrep -f "[s]sh.*-L {{ argocd_local_port }}:localhost:{{ argocd_local_port }}" | xargs -r kill || true
+        pgrep -f "[s]sh.*-L {{ prometheus_local_port }}:localhost:{{ prometheus_local_port }}" | xargs -r kill || true
+        pgrep -f "[s]sh.*-L {{ jenkins_local_port }}:localhost:8080" | xargs -r kill || true
+      changed_when: false
+      failed_when: false
+
+    - name: Open local tunnel to Bastion for Argo CD and Prometheus
+      ansible.builtin.shell: |
+        ssh -f -N \
+          -o ExitOnForwardFailure=yes \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -i "{{ bastion_key }}" \
+          -L {{ argocd_local_port }}:localhost:{{ argocd_local_port }} \
+          -L {{ prometheus_local_port }}:localhost:{{ prometheus_local_port }} \
+          ubuntu@{{ bastion_ip }}
+      changed_when: false
+
+    - name: Open local tunnel to Jenkins
+      ansible.builtin.shell: |
+        ssh -f -N \
+          -o ExitOnForwardFailure=yes \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -i "{{ jenkins_key }}" \
+          -L {{ jenkins_local_port }}:localhost:8080 \
+          ec2-user@{{ jenkins_ip }}
+      register: jenkins_tunnel
+      changed_when: false
+      failed_when: false
+
+    - name: Show all access information
+      ansible.builtin.debug:
+        msg:
+          - "ARGO CD URL: https://localhost:8080"
+          - "ARGO CD USERNAME: admin"
+          - "ARGO CD PASSWORD: {{ hostvars[bastion_host_name].argocd_password.stdout }}"
+          - "PROMETHEUS URL: http://localhost:9090"
+          - "JENKINS LOCAL URL: http://localhost:8082"
+          - "JENKINS DIRECT URL: http://{{ jenkins_ip }}:8080"
+          - "JENKINS STATUS: {{ hostvars[jenkins_host_name].jenkins_status.stdout }}"
+          - "JENKINS INITIAL PASSWORD: {{ hostvars[jenkins_host_name].jenkins_password.stdout }}"
+          - "If Argo opens with warning, click Advanced then Continue."
