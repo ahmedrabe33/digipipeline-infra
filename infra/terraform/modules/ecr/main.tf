@@ -2,6 +2,7 @@ resource "aws_ecr_repository" "this" {
   for_each = toset(var.repository_names)
 
   name                 = each.value
+  force_delete         = true
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -17,9 +18,9 @@ resource "aws_ecr_repository" "this" {
 }
 
 resource "aws_ecr_lifecycle_policy" "this" {
-  for_each = aws_ecr_repository.this
+  for_each = toset(var.repository_names)
 
-  repository = each.value.name
+  repository = aws_ecr_repository.this[each.key].name
 
   policy = jsonencode({
     rules = [

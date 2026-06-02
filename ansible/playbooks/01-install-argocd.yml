@@ -88,19 +88,22 @@
         'has been upgraded' in argocd_install.stdout or
         'has been installed' in argocd_install.stdout
 
-    - name: Wait for Argo CD pods to be ready
+    - name: Wait for Argo CD workloads to be ready
       ansible.builtin.shell: |
         set -e
 
         kubectl --kubeconfig "$HOME/.kube/config" \
           -n "{{ argocd_namespace }}" \
-          wait --for=condition=Ready pod \
-          --all \
+          rollout status deployment --all \
+          --timeout=600s
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ argocd_namespace }}" \
+          rollout status statefulset --all \
           --timeout=600s
       args:
         executable: /bin/bash
       changed_when: false
-
     - name: Get Argo CD pods
       ansible.builtin.shell: |
         set -e
