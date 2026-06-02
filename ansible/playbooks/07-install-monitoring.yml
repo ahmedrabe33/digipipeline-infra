@@ -1,0 +1,167 @@
+---
+- name: Install Prometheus and Grafana on EKS through Bastion
+  hosts: bastion
+  gather_facts: false
+
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  vars:
+    monitoring_namespace: monitoring
+    monitoring_release_name: kube-prometheus-stack
+    grafana_admin_password: admin123
+
+  tasks:
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - aws_region is defined
+          - cluster_name is defined
+        fail_msg: "Missing aws_region or cluster_name. Run 00-rebuild-infra.yml first."
+
+    - name: Check required tools on Bastion
+      ansible.builtin.shell: |
+        set -e
+        command -v aws
+        command -v kubectl
+        command -v helm
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.shell: |
+        set -e
+
+        mkdir -p "$HOME/.kube"
+
+        aws eks update-kubeconfig \
+          --region "{{ aws_region }}" \
+          --name "{{ cluster_name }}" \
+          --alias "{{ cluster_name }}" \
+          --kubeconfig "$HOME/.kube/config"
+
+        chmod 700 "$HOME/.kube"
+        chmod 600 "$HOME/.kube/config"
+
+        kubectl --kubeconfig "$HOME/.kube/config" config current-context
+      args:
+        executable: /bin/bash
+      register: kubeconfig_output
+      changed_when: false
+
+    - name: Show kubeconfig context
+      ansible.builtin.debug:
+        var: kubeconfig_output.stdout_lines
+
+    - name: Add Prometheus community Helm repo if missing
+      ansible.builtin.shell: |
+        set -e
+
+        if helm repo list | awk '{print $1}' | grep -qx "prometheus-community"; then
+          echo "Prometheus community Helm repo already exists"
+        else
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        fi
+      args:
+        executable: /bin/bash
+      register: prom_repo
+      changed_when: "'has been added' in prom_repo.stdout"
+
+    - name: Update Helm repos
+      ansible.builtin.command: helm repo update
+      changed_when: false
+
+    - name: Install or upgrade kube-prometheus-stack
+      ansible.builtin.shell: |
+        set -e
+
+        KUBECONFIG="$HOME/.kube/config" helm upgrade --install "{{ monitoring_release_name }}" prometheus-community/kube-prometheus-stack \
+          --namespace "{{ monitoring_namespace }}" \
+          --create-namespace \
+          --set grafana.service.type=ClusterIP \
+          --set grafana.adminPassword="{{ grafana_admin_password }}" \
+          --set prometheus.prometheusSpec.retention=6h \
+          --set prometheus.prometheusSpec.resources.requests.cpu=200m \
+          --set prometheus.prometheusSpec.resources.requests.memory=512Mi \
+          --set prometheus.prometheusSpec.resources.limits.cpu=500m \
+          --set prometheus.prometheusSpec.resources.limits.memory=1Gi \
+          --set alertmanager.enabled=false \
+          --wait \
+          --timeout 15m
+      args:
+        executable: /bin/bash
+      register: monitoring_install
+      changed_when: >
+        'has been upgraded' in monitoring_install.stdout or
+        'has been installed' in monitoring_install.stdout
+
+    - name: Show Helm result
+      ansible.builtin.debug:
+        var: monitoring_install.stdout_lines
+
+    - name: Wait for monitoring pods to be ready
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ monitoring_namespace }}" \
+          wait --for=condition=Ready pod \
+          --all \
+          --timeout=900s
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Verify monitoring pods
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          get pods -n "{{ monitoring_namespace }}" -o wide
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: monitoring_pods
+
+    - name: Show monitoring pods
+      ansible.builtin.debug:
+        var: monitoring_pods.stdout_lines
+
+    - name: Verify monitoring services
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          get svc -n "{{ monitoring_namespace }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: monitoring_svc
+
+    - name: Show monitoring services
+      ansible.builtin.debug:
+        var: monitoring_svc.stdout_lines
+
+    - name: Verify Helm releases
+      ansible.builtin.shell: |
+        set -e
+
+        KUBECONFIG="$HOME/.kube/config" helm list -n "{{ monitoring_namespace }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: helm_releases
+
+    - name: Show Helm releases
+      ansible.builtin.debug:
+        var: helm_releases.stdout_lines
+
+    - name: Show access info
+      ansible.builtin.debug:
+        msg:
+          - "Monitoring stack is installed."
+          - "Namespace: {{ monitoring_namespace }}"
+          - "Grafana username: admin"
+          - "Grafana password: {{ grafana_admin_password }}"
+          - "Grafana service is ClusterIP, access it using port-forward/tunnel playbook."

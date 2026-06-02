@@ -5,13 +5,17 @@
   gather_facts: false
 
   vars:
-    project_root: "/home/ahmedrabie/Documents/digipipeline-infra"
-    terraform_dir: "/home/ahmedrabie/Documents/digipipeline-infra/infra/terraform"
-    ansible_dir: "/home/ahmedrabie/Documents/digipipeline-infra/ansible"
-    aws_profile: "default"
-    aws_region: "us-east-1"
-    key_name: "devops-ha-eks-bastion-key"
-    key_path: "/home/ahmedrabie/.ssh/devops-ha-eks-bastion-key.pem"
+    project_root: "{{ playbook_dir | dirname | dirname }}"
+    terraform_dir: "{{ project_root }}/infra/terraform"
+    ansible_dir: "{{ project_root }}/ansible"
+
+    aws_profile: "{{ lookup('env', 'AWS_PROFILE') | default('default', true) }}"
+    aws_region: "{{ lookup('env', 'AWS_REGION') | default('us-east-1', true) }}"
+    jenkins_aws_region: "{{ lookup('env', 'JENKINS_AWS_REGION') | default('us-west-2', true) }}"
+
+    key_name: "{{ lookup('env', 'DIGIPIPELINE_KEY_NAME') | default('devops-ha-eks-bastion-key', true) }}"
+    key_path: "{{ lookup('env', 'DIGIPIPELINE_KEY_PATH') | default(lookup('env', 'HOME') ~ '/.ssh/' ~ key_name ~ '.pem', true) }}"
+    public_key_path: "{{ lookup('env', 'DIGIPIPELINE_PUBLIC_KEY_PATH') | default(key_path ~ '.pub', true) }}"
 
   tasks:
     - name: Check local SSH private key exists
@@ -24,6 +28,20 @@
         msg: "Missing SSH key: {{ key_path }}"
       when: not bastion_key.stat.exists
 
+    - name: Ensure local SSH public key exists for Terraform
+      ansible.builtin.shell: |
+        set -e
+        ssh-keygen -y -f "{{ key_path }}" > "{{ public_key_path }}"
+        chmod 644 "{{ public_key_path }}"
+      args:
+        executable: /bin/bash
+
+    - name: Ensure terraform.tfvars exists
+      ansible.builtin.copy:
+        src: "{{ terraform_dir }}/terraform.tfvars.example"
+        dest: "{{ terraform_dir }}/terraform.tfvars"
+        force: false
+
     - name: Get AWS account ID
       ansible.builtin.command: >
         aws sts get-caller-identity
@@ -33,7 +51,7 @@
       register: account_id_output
       changed_when: false
 
-    - name: Check AWS EC2 key pair
+    - name: Check AWS EC2 key pair in main region
       ansible.builtin.command: >
         aws ec2 describe-key-pairs
         --region {{ aws_region }}
@@ -43,24 +61,44 @@
       changed_when: false
       failed_when: false
 
-    - name: Import EC2 key pair if missing
+    - name: Import EC2 key pair in main region if missing
       ansible.builtin.shell: |
         set -e
-        ssh-keygen -y -f "{{ key_path }}" > /tmp/{{ key_name }}.pub
-
         aws ec2 import-key-pair \
           --region {{ aws_region }} \
           --profile {{ aws_profile }} \
           --key-name {{ key_name }} \
-          --public-key-material fileb:///tmp/{{ key_name }}.pub
+          --public-key-material fileb://{{ public_key_path }}
       args:
         executable: /bin/bash
       when: keypair_check.rc != 0
+
+    - name: Check AWS EC2 key pair in Jenkins region
+      ansible.builtin.command: >
+        aws ec2 describe-key-pairs
+        --region {{ jenkins_aws_region }}
+        --profile {{ aws_profile }}
+        --key-names {{ key_name }}
+      register: jenkins_keypair_check
+      changed_when: false
+      failed_when: false
 
     - name: Get current public IP
       ansible.builtin.shell: curl -s https://checkip.amazonaws.com | tr -d '\n'
       register: my_public_ip
       changed_when: false
+
+    - name: Update aws_region in terraform.tfvars
+      ansible.builtin.lineinfile:
+        path: "{{ terraform_dir }}/terraform.tfvars"
+        regexp: '^aws_region\s*='
+        line: 'aws_region = "{{ aws_region }}"'
+
+    - name: Update jenkins_aws_region in terraform.tfvars
+      ansible.builtin.lineinfile:
+        path: "{{ terraform_dir }}/terraform.tfvars"
+        regexp: '^jenkins_aws_region\s*='
+        line: 'jenkins_aws_region = "{{ jenkins_aws_region }}"'
 
     - name: Update my_ip_cidr in terraform.tfvars
       ansible.builtin.lineinfile:
@@ -74,10 +112,26 @@
         regexp: '^key_name\s*='
         line: 'key_name = "{{ key_name }}"'
 
+    - name: Update public_key_path in terraform.tfvars
+      ansible.builtin.lineinfile:
+        path: "{{ terraform_dir }}/terraform.tfvars"
+        regexp: '^public_key_path\s*='
+        line: 'public_key_path = "{{ public_key_path }}"'
+
     - name: Terraform init
       ansible.builtin.command: terraform init -reconfigure
       args:
         chdir: "{{ terraform_dir }}"
+
+    - name: Import Jenkins key pair into Terraform state if it already exists in AWS
+      ansible.builtin.shell: |
+        set -e
+        terraform state show module.jenkins.aws_key_pair.jenkins >/dev/null 2>&1 || \
+        terraform import module.jenkins.aws_key_pair.jenkins "{{ key_name }}"
+      args:
+        chdir: "{{ terraform_dir }}"
+        executable: /bin/bash
+      when: jenkins_keypair_check.rc == 0
 
     - name: Terraform fmt
       ansible.builtin.command: terraform fmt -recursive
@@ -90,7 +144,7 @@
         chdir: "{{ terraform_dir }}"
 
     - name: Terraform apply
-      ansible.builtin.command: terraform apply -auto-approve
+      ansible.builtin.command: terraform apply -auto-approve -no-color
       args:
         chdir: "{{ terraform_dir }}"
 
@@ -105,6 +159,16 @@
       ansible.builtin.set_fact:
         tf: "{{ tf_output.stdout | from_json }}"
         aws_account_id: "{{ account_id_output.stdout }}"
+        cluster_name: "{{ (tf_output.stdout | from_json).cluster_name.value }}"
+
+    - name: Ensure Ansible inventory directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ ansible_dir }}/inventories/dev"
+        - "{{ ansible_dir }}/inventories/dev/group_vars"
 
     - name: Update Ansible hosts.ini with new Bastion and Jenkins hosts
       ansible.builtin.copy:
@@ -118,7 +182,7 @@
 
           [jenkins_agents]
           {% for ip in tf.jenkins_agent_private_ips.value %}
-          jenkins-agent-{{ loop.index }} ansible_host={{ ip }} ansible_user=ec2-user ansible_ssh_private_key_file={{ key_path }} ansible_ssh_common_args='-o ProxyJump=ec2-user@{{ tf.jenkins_controller_public_ip.value }} -o StrictHostKeyChecking=no'
+          jenkins-agent-{{ loop.index }} ansible_host={{ ip }} ansible_user=ec2-user ansible_ssh_private_key_file={{ key_path }} ansible_ssh_common_args='-o ProxyJump=ec2-user@{{ tf.jenkins_controller_public_ip.value }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
           {% endfor %}
 
     - name: Update Ansible all.yml with new Terraform outputs
@@ -127,6 +191,7 @@
         content: |
           aws_profile: "{{ aws_profile }}"
           aws_region: "{{ aws_region }}"
+          jenkins_aws_region: "{{ jenkins_aws_region }}"
           aws_account_id: "{{ aws_account_id }}"
 
           cluster_name: "{{ tf.cluster_name.value }}"
@@ -173,7 +238,6 @@
         ansible_ssh_private_key_file: "{{ key_path }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
         ansible_python_interpreter: /usr/bin/python3
-
 
     - name: Wait for SSH on Bastion
       ansible.builtin.wait_for:
@@ -253,7 +317,6 @@
     - name: Show EKS nodes
       ansible.builtin.debug:
         var: eks_nodes.stdout_lines
-
 
     - name: Show next command
       ansible.builtin.debug:

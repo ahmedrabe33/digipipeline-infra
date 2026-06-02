@@ -2,9 +2,26 @@
 - name: Install Jenkins controller on EC2
   hosts: jenkins_controller
   become: true
-  gather_facts: false
+  gather_facts: true
+
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  vars:
+    jenkins_container_name: jenkins-controller
+    jenkins_home: /var/jenkins_home
+    jenkins_image: jenkins/jenkins:lts
+    jenkins_http_port: 8080
+    jenkins_agent_port: 50000
 
   tasks:
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - jenkins_url is defined
+          - jenkins_controller_public_ip is defined
+        fail_msg: "Missing Jenkins variables. Run 00-rebuild-infra.yml first."
+
     - name: Install required packages
       ansible.builtin.dnf:
         name:
@@ -12,6 +29,7 @@
           - git
           - awscli
         state: present
+        update_cache: true
 
     - name: Enable and start Docker
       ansible.builtin.systemd:
@@ -21,44 +39,102 @@
 
     - name: Create Jenkins home directory
       ansible.builtin.file:
-        path: /var/jenkins_home
+        path: "{{ jenkins_home }}"
         state: directory
         owner: "1000"
         group: "1000"
         mode: "0755"
 
-    - name: Run Jenkins controller container
+    - name: Pull Jenkins image
+      ansible.builtin.command: docker pull "{{ jenkins_image }}"
+      changed_when: "'Downloaded newer image' in docker_pull.stdout"
+      register: docker_pull
+
+    - name: Check Jenkins controller container
+      ansible.builtin.command: docker ps -a --filter "name=^/{{ jenkins_container_name }}$" --format "{{ '{{.Names}}' }}"
+      register: jenkins_container_check
+      changed_when: false
+
+    - name: Run Jenkins controller container if missing
       ansible.builtin.shell: |
-        docker rm -f jenkins-controller 2>/dev/null || true
+        set -e
 
         docker run -d \
-          --name jenkins-controller \
+          --name "{{ jenkins_container_name }}" \
           --restart unless-stopped \
-          -p 8080:8080 \
-          -p 50000:50000 \
-          -v /var/jenkins_home:/var/jenkins_home \
-          jenkins/jenkins:lts
+          -p {{ jenkins_http_port }}:8080 \
+          -p {{ jenkins_agent_port }}:50000 \
+          -v {{ jenkins_home }}:/var/jenkins_home \
+          "{{ jenkins_image }}"
       args:
         executable: /bin/bash
+      when: jenkins_container_check.stdout | trim == ""
 
-    - name: Wait for Jenkins initial password
+    - name: Start Jenkins controller container if stopped
+      ansible.builtin.command: docker start "{{ jenkins_container_name }}"
+      register: jenkins_start
+      changed_when: "'{{ jenkins_container_name }}' in jenkins_start.stdout"
+      failed_when: false
+
+    - name: Wait for Jenkins HTTP port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ jenkins_http_port }}"
+        timeout: 300
+        delay: 10
+
+    - name: Wait for Jenkins initial password file or Jenkins startup
       ansible.builtin.shell: |
+        set -e
+
         for i in {1..60}; do
-          docker exec jenkins-controller test -f /var/jenkins_home/secrets/initialAdminPassword && exit 0
+          if docker exec "{{ jenkins_container_name }}" test -f /var/jenkins_home/secrets/initialAdminPassword; then
+            echo "initial-password-found"
+            exit 0
+          fi
+
+          if docker logs "{{ jenkins_container_name }}" 2>&1 | grep -qi "Jenkins is fully up and running"; then
+            echo "jenkins-running-no-initial-password"
+            exit 0
+          fi
+
           sleep 10
         done
+
+        docker logs "{{ jenkins_container_name }}" --tail 80
         exit 1
       args:
         executable: /bin/bash
+      register: jenkins_ready
       changed_when: false
 
-    - name: Read Jenkins initial admin password
-      ansible.builtin.command: docker exec jenkins-controller cat /var/jenkins_home/secrets/initialAdminPassword
+    - name: Read Jenkins initial admin password if available
+      ansible.builtin.shell: |
+        set -e
+
+        if docker exec "{{ jenkins_container_name }}" test -f /var/jenkins_home/secrets/initialAdminPassword; then
+          docker exec "{{ jenkins_container_name }}" cat /var/jenkins_home/secrets/initialAdminPassword
+        else
+          echo "initial-password-not-found-or-jenkins-already-configured"
+        fi
+      args:
+        executable: /bin/bash
       register: jenkins_password
       changed_when: false
+
+    - name: Show Jenkins container status
+      ansible.builtin.command: docker ps --filter "name=^/{{ jenkins_container_name }}$"
+      register: jenkins_ps
+      changed_when: false
+
+    - name: Print Jenkins status
+      ansible.builtin.debug:
+        var: jenkins_ps.stdout_lines
 
     - name: Show Jenkins access
       ansible.builtin.debug:
         msg:
           - "Jenkins URL: {{ jenkins_url }}"
+          - "Jenkins Controller Public IP: {{ jenkins_controller_public_ip }}"
           - "Initial Admin Password: {{ jenkins_password.stdout }}"
+          - "Run from LOCAL to show CI info: ansible-playbook -i inventories/dev/hosts.ini playbooks/22-show-ci-info.yml"

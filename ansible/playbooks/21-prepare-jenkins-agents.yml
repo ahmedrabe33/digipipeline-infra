@@ -2,17 +2,24 @@
 - name: Prepare Jenkins SSH agents
   hosts: jenkins_agents
   become: true
-  gather_facts: false
+  gather_facts: true
+
+  vars:
+    jenkins_user: jenkins
+    jenkins_home: /home/jenkins
 
   tasks:
     - name: Install required packages on agents
       ansible.builtin.dnf:
         name:
-          - java-17-amazon-corretto-headless
+          - java-21-amazon-corretto-headless
           - docker
           - git
           - awscli
+          - unzip
+          - jq
         state: present
+        update_cache: true
 
     - name: Enable and start Docker
       ansible.builtin.systemd:
@@ -22,36 +29,38 @@
 
     - name: Create jenkins user
       ansible.builtin.user:
-        name: jenkins
+        name: "{{ jenkins_user }}"
         shell: /bin/bash
         groups: docker
         append: true
         create_home: true
+        home: "{{ jenkins_home }}"
 
     - name: Create .ssh directory for jenkins user
       ansible.builtin.file:
-        path: /home/jenkins/.ssh
+        path: "{{ jenkins_home }}/.ssh"
         state: directory
-        owner: jenkins
-        group: jenkins
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_user }}"
         mode: "0700"
 
     - name: Copy EC2 authorized_keys to jenkins user
       ansible.builtin.copy:
         src: /home/ec2-user/.ssh/authorized_keys
-        dest: /home/jenkins/.ssh/authorized_keys
+        dest: "{{ jenkins_home }}/.ssh/authorized_keys"
         remote_src: true
-        owner: jenkins
-        group: jenkins
+        owner: "{{ jenkins_user }}"
+        group: "{{ jenkins_user }}"
         mode: "0600"
 
     - name: Allow jenkins user passwordless sudo
       ansible.builtin.copy:
         dest: /etc/sudoers.d/jenkins
-        content: "jenkins ALL=(ALL) NOPASSWD:ALL\n"
+        content: "{{ jenkins_user }} ALL=(ALL) NOPASSWD:ALL\n"
         owner: root
         group: root
         mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
 
     - name: Verify Java
       ansible.builtin.command: java -version
@@ -63,8 +72,25 @@
       register: docker_check
       changed_when: false
 
+    - name: Verify Git
+      ansible.builtin.command: git --version
+      register: git_check
+      changed_when: false
+
+    - name: Verify AWS CLI
+      ansible.builtin.command: aws --version
+      register: aws_check
+      changed_when: false
+
+    - name: Verify jenkins user can access Docker
+      ansible.builtin.command: sudo -u "{{ jenkins_user }}" docker ps
+      register: jenkins_docker_check
+      changed_when: false
+
     - name: Show agent readiness
       ansible.builtin.debug:
         msg:
-          - "{{ inventory_hostname }} is ready"
+          - "{{ inventory_hostname }} is ready as Jenkins SSH agent"
           - "{{ docker_check.stdout }}"
+          - "{{ git_check.stdout }}"
+          - "{{ aws_check.stdout }}"

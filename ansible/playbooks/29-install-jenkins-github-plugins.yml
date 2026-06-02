@@ -1,0 +1,126 @@
+---
+- name: Install Jenkins GitHub, Git, Pipeline, Docker and Sonar plugins
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  vars:
+    jenkins_container_name: jenkins-controller
+    jenkins_plugins:
+      - git
+      - github
+      - github-branch-source
+      - credentials-binding
+      - workflow-aggregator
+      - docker-workflow
+      - pipeline-utility-steps
+      - sonar
+
+  tasks:
+    - name: Check Jenkins container is running
+      ansible.builtin.shell: |
+        docker ps --quiet --filter "name=^/{{ jenkins_container_name }}$"
+      register: jenkins_container
+      changed_when: false
+      failed_when: jenkins_container.stdout | length == 0
+
+    - name: Detect Java inside Jenkins container
+      ansible.builtin.shell: |
+        set -e
+
+        docker exec -u root "{{ jenkins_container_name }}" sh -c '
+          if command -v java >/dev/null 2>&1; then
+            command -v java
+            exit 0
+          fi
+
+          for p in \
+            /opt/java/openjdk/bin/java \
+            /usr/local/openjdk-21/bin/java \
+            /usr/local/openjdk-17/bin/java \
+            /usr/lib/jvm/*/bin/java
+          do
+            if [ -x "$p" ]; then
+              echo "$p"
+              exit 0
+            fi
+          done
+
+          echo "JAVA_NOT_FOUND"
+          exit 1
+        '
+      args:
+        executable: /bin/bash
+      register: java_in_container
+      changed_when: false
+
+    - name: Set Java path fact
+      ansible.builtin.set_fact:
+        jenkins_java_bin: "{{ java_in_container.stdout_lines[0] }}"
+        jenkins_java_dir: "{{ java_in_container.stdout_lines[0] | dirname }}"
+
+    - name: Show detected Java
+      ansible.builtin.debug:
+        msg:
+          - "Java binary inside Jenkins container: {{ jenkins_java_bin }}"
+          - "Java directory inside Jenkins container: {{ jenkins_java_dir }}"
+
+    - name: Install Jenkins plugins
+      ansible.builtin.shell: |
+        set -e
+
+        docker exec \
+          -u root \
+          -e PATH="{{ jenkins_java_dir }}:/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+          -e PLUGINS="{{ jenkins_plugins | join(' ') }}" \
+          "{{ jenkins_container_name }}" \
+          sh -c '
+            echo "Java path:"
+            command -v java
+            java -version
+
+            echo "Installing plugins:"
+            echo "$PLUGINS"
+
+            jenkins-plugin-cli --plugins $PLUGINS
+
+            chown -R 1000:1000 /var/jenkins_home/plugins
+          '
+      args:
+        executable: /bin/bash
+      register: plugin_install
+
+    - name: Restart Jenkins container
+      ansible.builtin.command: docker restart "{{ jenkins_container_name }}"
+      register: restart_result
+
+    - name: Wait for Jenkins to come back on controller
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8080
+        timeout: 300
+        delay: 20
+
+    - name: Verify installed plugins
+      ansible.builtin.shell: |
+        set -e
+
+        docker exec \
+          -u root \
+          -e PATH="{{ jenkins_java_dir }}:/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+          "{{ jenkins_container_name }}" \
+          sh -c '
+            jenkins-plugin-cli --list \
+              | grep -E "git|github|github-branch-source|credentials-binding|docker-workflow|workflow-aggregator|pipeline-utility-steps|sonar" || true
+          '
+      args:
+        executable: /bin/bash
+      register: plugins_check
+      changed_when: false
+
+    - name: Show plugin install output
+      ansible.builtin.debug:
+        msg:
+          - "Restart result: {{ restart_result.stdout }}"
+          - "Installed plugins:"
+          - "{{ plugins_check.stdout_lines }}"

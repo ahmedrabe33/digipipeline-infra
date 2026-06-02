@@ -4,35 +4,85 @@
   gather_facts: false
 
   tasks:
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - aws_region is defined
+          - cluster_name is defined
+        fail_msg: "Missing aws_region or cluster_name. Run 00-rebuild-infra.yml first to generate inventory/group_vars."
+
+    - name: Check required tools on Bastion
+      ansible.builtin.shell: |
+        set -e
+        command -v aws
+        command -v kubectl
+        command -v helm
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Update kubeconfig on Bastion
-      ansible.builtin.command: >
-        aws eks update-kubeconfig
-        --region {{ aws_region }}
-        --name {{ cluster_name }}
+      ansible.builtin.shell: |
+        set -e
+
+        mkdir -p "$HOME/.kube"
+
+        aws eks update-kubeconfig \
+          --region "{{ aws_region }}" \
+          --name "{{ cluster_name }}" \
+          --alias "{{ cluster_name }}" \
+          --kubeconfig "$HOME/.kube/config"
+
+        chmod 700 "$HOME/.kube"
+        chmod 600 "$HOME/.kube/config"
+
+        kubectl --kubeconfig "$HOME/.kube/config" config current-context
+      args:
+        executable: /bin/bash
+      register: kubeconfig_output
       changed_when: false
 
-    - name: Get EKS nodes
-      ansible.builtin.command: kubectl get nodes -o wide
-      changed_when: false
+    - name: Show current Kubernetes context
+      ansible.builtin.debug:
+        var: kubeconfig_output.stdout_lines
+
+    - name: Wait until EKS nodes are ready
+      ansible.builtin.shell: |
+        set -e
+        kubectl --kubeconfig "$HOME/.kube/config" get nodes -o wide
+      args:
+        executable: /bin/bash
       register: nodes_output
+      changed_when: false
+      retries: 18
+      delay: 10
+      until: nodes_output.rc == 0
 
-    - name: Show nodes
+    - name: Show EKS nodes
       ansible.builtin.debug:
         var: nodes_output.stdout_lines
 
-    - name: Get all pods
-      ansible.builtin.command: kubectl get pods -A
-      changed_when: false
+    - name: Get all Kubernetes pods
+      ansible.builtin.shell: |
+        set -e
+        kubectl --kubeconfig "$HOME/.kube/config" get pods -A -o wide
+      args:
+        executable: /bin/bash
       register: pods_output
+      changed_when: false
 
-    - name: Show pods
+    - name: Show all Kubernetes pods
       ansible.builtin.debug:
         var: pods_output.stdout_lines
 
     - name: Get Helm releases
-      ansible.builtin.command: helm list -A
-      changed_when: false
+      ansible.builtin.shell: |
+        set -e
+        helm --kubeconfig "$HOME/.kube/config" list -A
+      args:
+        executable: /bin/bash
       register: helm_output
+      changed_when: false
 
     - name: Show Helm releases
       ansible.builtin.debug:

@@ -1,0 +1,40 @@
+---
+- name: Install SonarQube plugin in Jenkins controller
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  vars:
+    jenkins_container_name: jenkins-controller
+    plugin_name: sonar
+
+  tasks:
+    - name: Check Jenkins container is running
+      ansible.builtin.shell: |
+        docker ps --filter "name=^/{{ jenkins_container_name }}$" --format "{{ '{{.Names}}' }}"
+      register: jenkins_container
+      changed_when: false
+      failed_when: jenkins_container.stdout != jenkins_container_name
+
+    - name: Install SonarQube Scanner plugin
+      ansible.builtin.shell: |
+        set -e
+
+        docker exec "{{ jenkins_container_name }}" \
+          jenkins-plugin-cli --plugins "{{ plugin_name }}"
+
+        docker restart "{{ jenkins_container_name }}"
+      args:
+        executable: /bin/bash
+      register: plugin_install
+
+    - name: Wait for Jenkins to come back
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8080
+        timeout: 300
+        delay: 15
+
+    - name: Show plugin install result
+      ansible.builtin.debug:
+        var: plugin_install.stdout_lines

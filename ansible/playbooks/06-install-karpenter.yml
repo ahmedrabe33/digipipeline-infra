@@ -7,21 +7,64 @@
     - ../inventories/dev/group_vars/all.yml
 
   tasks:
-    - name: Update kubeconfig on Bastion
-      ansible.builtin.command: >
-        aws eks update-kubeconfig
-        --region {{ aws_region }}
-        --name {{ cluster_name }}
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - aws_region is defined
+          - cluster_name is defined
+          - karpenter_namespace is defined
+          - karpenter_service_account_name is defined
+          - karpenter_controller_role_arn is defined
+          - karpenter_node_role_name is defined
+          - karpenter_ec2nodeclass_name is defined
+          - karpenter_nodepool_name is defined
+        fail_msg: "Missing required Karpenter variables. Run 00-rebuild-infra.yml first."
+
+    - name: Check required tools on Bastion
+      ansible.builtin.shell: |
+        set -e
+        command -v aws
+        command -v kubectl
+        command -v helm
+      args:
+        executable: /bin/bash
       changed_when: false
+
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.shell: |
+        set -e
+
+        mkdir -p "$HOME/.kube"
+
+        aws eks update-kubeconfig \
+          --region "{{ aws_region }}" \
+          --name "{{ cluster_name }}" \
+          --alias "{{ cluster_name }}" \
+          --kubeconfig "$HOME/.kube/config"
+
+        chmod 700 "$HOME/.kube"
+        chmod 600 "$HOME/.kube/config"
+
+        kubectl --kubeconfig "$HOME/.kube/config" config current-context
+      args:
+        executable: /bin/bash
+      register: kubeconfig_output
+      changed_when: false
+
+    - name: Show kubeconfig context
+      ansible.builtin.debug:
+        var: kubeconfig_output.stdout_lines
 
     - name: Install or upgrade Karpenter with Helm
       ansible.builtin.shell: |
-        helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
-          --namespace {{ karpenter_namespace }} \
+        set -e
+
+        KUBECONFIG="$HOME/.kube/config" helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
+          --namespace "{{ karpenter_namespace }}" \
           --create-namespace \
-          --set settings.clusterName={{ cluster_name }} \
-          --set serviceAccount.name={{ karpenter_service_account_name }} \
-          --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn={{ karpenter_controller_role_arn }}' \
+          --set settings.clusterName="{{ cluster_name }}" \
+          --set serviceAccount.name="{{ karpenter_service_account_name }}" \
+          --set-string "serviceAccount.annotations.eks\.amazonaws\.com/role-arn={{ karpenter_controller_role_arn }}" \
           --set controller.resources.requests.cpu=500m \
           --set controller.resources.requests.memory=512Mi \
           --set controller.resources.limits.cpu=1 \
@@ -31,21 +74,46 @@
       args:
         executable: /bin/bash
       register: karpenter_install
+      changed_when: >
+        'has been upgraded' in karpenter_install.stdout or
+        'has been installed' in karpenter_install.stdout
 
     - name: Show Karpenter Helm result
       ansible.builtin.debug:
         var: karpenter_install.stdout_lines
 
     - name: Wait for Karpenter rollout
-      ansible.builtin.command: >
-        kubectl -n {{ karpenter_namespace }}
-        rollout status deployment/karpenter
-        --timeout=300s
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ karpenter_namespace }}" \
+          rollout status deployment/karpenter \
+          --timeout=300s
+      args:
+        executable: /bin/bash
       changed_when: false
 
-    - name: Create EC2NodeClass and NodePool
+    - name: Wait for Karpenter CRDs
       ansible.builtin.shell: |
-        cat <<MANIFEST | kubectl apply -f -
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          wait --for condition=Established crd/ec2nodeclasses.karpenter.k8s.aws \
+          --timeout=300s
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          wait --for condition=Established crd/nodepools.karpenter.sh \
+          --timeout=300s
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Create or update EC2NodeClass and NodePool
+      ansible.builtin.shell: |
+        set -e
+
+        cat <<MANIFEST | kubectl --kubeconfig "$HOME/.kube/config" apply -f -
         apiVersion: karpenter.k8s.aws/v1
         kind: EC2NodeClass
         metadata:
@@ -78,16 +146,21 @@
               requirements:
                 - key: kubernetes.io/arch
                   operator: In
-                  values: ["amd64"]
+                  values:
+                    - amd64
                 - key: kubernetes.io/os
                   operator: In
-                  values: ["linux"]
+                  values:
+                    - linux
                 - key: karpenter.sh/capacity-type
                   operator: In
-                  values: ["on-demand"]
+                  values:
+                    - on-demand
                 - key: node.kubernetes.io/instance-type
                   operator: In
-                  values: ["t3.medium", "t3.large"]
+                  values:
+                    - t3.medium
+                    - t3.large
           limits:
             cpu: "4"
             memory: 8Gi
@@ -98,13 +171,23 @@
       args:
         executable: /bin/bash
       register: karpenter_resources
+      changed_when: >
+        'created' in karpenter_resources.stdout or
+        'configured' in karpenter_resources.stdout
 
     - name: Show Karpenter resources result
       ansible.builtin.debug:
         var: karpenter_resources.stdout_lines
 
     - name: Verify Karpenter pods
-      ansible.builtin.command: kubectl -n {{ karpenter_namespace }} get pods -l app.kubernetes.io/name=karpenter -o wide
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ karpenter_namespace }}" \
+          get pods -l app.kubernetes.io/name=karpenter -o wide
+      args:
+        executable: /bin/bash
       changed_when: false
       register: karpenter_pods
 
@@ -113,10 +196,24 @@
         var: karpenter_pods.stdout_lines
 
     - name: Verify NodePool and EC2NodeClass
-      ansible.builtin.command: kubectl get nodepool,ec2nodeclass
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" get nodepool
+        kubectl --kubeconfig "$HOME/.kube/config" get ec2nodeclass
+      args:
+        executable: /bin/bash
       changed_when: false
       register: karpenter_objects
 
     - name: Show NodePool and EC2NodeClass
       ansible.builtin.debug:
         var: karpenter_objects.stdout_lines
+
+    - name: Show next command
+      ansible.builtin.debug:
+        msg:
+          - "Karpenter is installed."
+          - "NodePool: {{ karpenter_nodepool_name }}"
+          - "EC2NodeClass: {{ karpenter_ec2nodeclass_name }}"
+          - "Next: deploy a workload that needs extra capacity to test node provisioning."

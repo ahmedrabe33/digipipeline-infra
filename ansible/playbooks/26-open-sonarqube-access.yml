@@ -1,0 +1,64 @@
+---
+- name: Open local SonarQube tunnel
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    sonar_local_port: 9000
+    sonar_remote_port: 9000
+
+  tasks:
+    - name: Set Jenkins controller host
+      ansible.builtin.set_fact:
+        jenkins_host_name: "{{ groups['jenkins_controller'][0] }}"
+
+    - name: Set Jenkins access facts
+      ansible.builtin.set_fact:
+        jenkins_ip: "{{ hostvars[jenkins_host_name].ansible_host }}"
+        jenkins_key: "{{ hostvars[jenkins_host_name].ansible_ssh_private_key_file }}"
+
+    - name: Check Jenkins SSH key exists
+      ansible.builtin.stat:
+        path: "{{ jenkins_key }}"
+      register: jenkins_key_check
+
+    - name: Stop if Jenkins SSH key is missing
+      ansible.builtin.fail:
+        msg: "Missing Jenkins SSH key: {{ jenkins_key }}"
+      when: not jenkins_key_check.stat.exists
+
+    - name: Stop old SonarQube SSH tunnel if exists
+      ansible.builtin.shell: |
+        pgrep -f "[s]sh.*-L {{ sonar_local_port }}:localhost:{{ sonar_remote_port }}" | xargs -r kill || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+
+    - name: Open local tunnel to SonarQube
+      ansible.builtin.shell: |
+        ssh -f -N \
+          -o ExitOnForwardFailure=yes \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o IdentitiesOnly=yes \
+          -i "{{ jenkins_key }}" \
+          -L "{{ sonar_local_port }}:localhost:{{ sonar_remote_port }}" \
+          ec2-user@"{{ jenkins_ip }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Verify local SonarQube tunnel
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ sonar_local_port }}"
+        timeout: 60
+
+    - name: Show SonarQube access
+      ansible.builtin.debug:
+        msg:
+          - "SonarQube URL: http://localhost:{{ sonar_local_port }}"
+          - "Default username: admin"
+          - "Default password: admin"
+          - "After first login, change the password and create token."

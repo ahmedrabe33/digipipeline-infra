@@ -1,0 +1,54 @@
+---
+- name: Verify SonarQube on Jenkins controller
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check SonarQube container
+      ansible.builtin.shell: |
+        docker ps --filter name=sonarqube
+        curl -s http://127.0.0.1:9000/api/system/status || true
+      args:
+        executable: /bin/bash
+      register: sonar_check
+      changed_when: false
+
+    - name: Show SonarQube check
+      ansible.builtin.debug:
+        var: sonar_check.stdout_lines
+
+
+- name: Verify Trivy and SonarQube access from Jenkins agents
+  hosts: jenkins_agents
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  tasks:
+    - name: Verify Trivy
+      ansible.builtin.shell: |
+        cd /home/jenkins
+        sudo -u jenkins -H trivy --version
+      args:
+        executable: /bin/bash
+      register: trivy_check
+      changed_when: false
+
+    - name: Verify access to SonarQube from agent
+      ansible.builtin.shell: |
+        curl -I --connect-timeout 10 http://{{ jenkins_controller_private_ip }}:9000 || true
+      args:
+        executable: /bin/bash
+      register: sonar_agent_check
+      changed_when: false
+
+    - name: Show agent DevSecOps check
+      ansible.builtin.debug:
+        msg:
+          - "Trivy:"
+          - "{{ trivy_check.stdout_lines }}"
+          - "SonarQube from agent:"
+          - "{{ sonar_agent_check.stdout_lines }}"

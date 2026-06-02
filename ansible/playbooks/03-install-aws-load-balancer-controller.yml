@@ -8,6 +8,19 @@
     - ../inventories/dev/group_vars/all.yml
 
   tasks:
+    - name: Check required local variables
+      ansible.builtin.assert:
+        that:
+          - aws_profile is defined
+          - aws_region is defined
+          - aws_account_id is defined
+          - cluster_name is defined
+          - aws_lbc_policy_name is defined
+          - aws_lbc_role_name is defined
+          - aws_lbc_namespace is defined
+          - aws_lbc_service_account_name is defined
+        fail_msg: "Missing required LBC variables. Run 00-rebuild-infra.yml first."
+
     - name: Create or update AWS Load Balancer Controller IAM resources
       ansible.builtin.shell: |
         set -euo pipefail
@@ -16,26 +29,29 @@
         ROLE_ARN="arn:aws:iam::{{ aws_account_id }}:role/{{ aws_lbc_role_name }}"
 
         OIDC_URL=$(aws eks describe-cluster \
-          --region {{ aws_region }} \
-          --profile {{ aws_profile }} \
-          --name {{ cluster_name }} \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --name "{{ cluster_name }}" \
           --query "cluster.identity.oidc.issuer" \
           --output text)
 
         OIDC_PROVIDER="${OIDC_URL#https://}"
+
+        echo "OIDC_URL=$OIDC_URL"
+        echo "OIDC_PROVIDER=$OIDC_PROVIDER"
 
         curl -fsSL \
           https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json \
           -o /tmp/aws-load-balancer-controller-iam-policy.json
 
         if aws iam get-policy \
-          --profile {{ aws_profile }} \
+          --profile "{{ aws_profile }}" \
           --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
           echo "IAM policy already exists: $POLICY_ARN"
         else
           aws iam create-policy \
-            --profile {{ aws_profile }} \
-            --policy-name {{ aws_lbc_policy_name }} \
+            --profile "{{ aws_profile }}" \
+            --policy-name "{{ aws_lbc_policy_name }}" \
             --policy-document file:///tmp/aws-load-balancer-controller-iam-policy.json
         fi
 
@@ -61,28 +77,34 @@
         JSON
 
         if aws iam get-role \
-          --profile {{ aws_profile }} \
-          --role-name {{ aws_lbc_role_name }} >/dev/null 2>&1; then
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ aws_lbc_role_name }}" >/dev/null 2>&1; then
+          echo "IAM role already exists. Updating trust policy..."
           aws iam update-assume-role-policy \
-            --profile {{ aws_profile }} \
-            --role-name {{ aws_lbc_role_name }} \
+            --profile "{{ aws_profile }}" \
+            --role-name "{{ aws_lbc_role_name }}" \
             --policy-document file:///tmp/aws-lbc-trust-policy.json
         else
           aws iam create-role \
-            --profile {{ aws_profile }} \
-            --role-name {{ aws_lbc_role_name }} \
+            --profile "{{ aws_profile }}" \
+            --role-name "{{ aws_lbc_role_name }}" \
             --assume-role-policy-document file:///tmp/aws-lbc-trust-policy.json
         fi
 
         aws iam attach-role-policy \
-          --profile {{ aws_profile }} \
-          --role-name {{ aws_lbc_role_name }} \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ aws_lbc_role_name }}" \
           --policy-arn "$POLICY_ARN" || true
 
+        echo "LBC_POLICY_ARN=$POLICY_ARN"
         echo "LBC_ROLE_ARN=$ROLE_ARN"
       args:
         executable: /bin/bash
       register: iam_output
+      changed_when: >
+        'create-policy' in iam_output.stdout or
+        'create-role' in iam_output.stdout or
+        'Updating trust policy' in iam_output.stdout
 
     - name: Show IAM result
       ansible.builtin.debug:
@@ -97,20 +119,66 @@
     - ../inventories/dev/group_vars/all.yml
 
   tasks:
-    - name: Update kubeconfig on Bastion
-      ansible.builtin.command: >
-        aws eks update-kubeconfig
-        --region {{ aws_region }}
-        --name {{ cluster_name }}
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - aws_region is defined
+          - cluster_name is defined
+          - vpc_id is defined
+          - aws_account_id is defined
+          - aws_lbc_role_name is defined
+          - aws_lbc_namespace is defined
+          - aws_lbc_service_account_name is defined
+        fail_msg: "Missing required LBC variables. Run 00-rebuild-infra.yml first."
+
+    - name: Check required tools on Bastion
+      ansible.builtin.shell: |
+        set -e
+        command -v aws
+        command -v kubectl
+        command -v helm
+      args:
+        executable: /bin/bash
       changed_when: false
 
-    - name: Add EKS Helm repo
-      ansible.builtin.command: helm repo add eks https://aws.github.io/eks-charts
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.shell: |
+        set -e
+
+        mkdir -p "$HOME/.kube"
+
+        aws eks update-kubeconfig \
+          --region "{{ aws_region }}" \
+          --name "{{ cluster_name }}" \
+          --alias "{{ cluster_name }}" \
+          --kubeconfig "$HOME/.kube/config"
+
+        chmod 700 "$HOME/.kube"
+        chmod 600 "$HOME/.kube/config"
+
+        kubectl --kubeconfig "$HOME/.kube/config" config current-context
+      args:
+        executable: /bin/bash
+      register: kubeconfig_output
+      changed_when: false
+
+    - name: Show kubeconfig context
+      ansible.builtin.debug:
+        var: kubeconfig_output.stdout_lines
+
+    - name: Add EKS Helm repo if missing
+      ansible.builtin.shell: |
+        set -e
+
+        if helm repo list | awk '{print $1}' | grep -qx "eks"; then
+          echo "EKS Helm repo already exists"
+        else
+          helm repo add eks https://aws.github.io/eks-charts
+        fi
+      args:
+        executable: /bin/bash
       register: eks_repo
       changed_when: "'has been added' in eks_repo.stdout"
-      failed_when:
-        - eks_repo.rc != 0
-        - "'already exists' not in eks_repo.stderr"
 
     - name: Update Helm repos
       ansible.builtin.command: helm repo update
@@ -118,35 +186,49 @@
 
     - name: Install or upgrade AWS Load Balancer Controller
       ansible.builtin.shell: |
-        helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-          --namespace {{ aws_lbc_namespace }} \
-          --set clusterName={{ cluster_name }} \
-          --set region={{ aws_region }} \
-          --set vpcId={{ vpc_id }} \
+        set -e
+
+        KUBECONFIG="$HOME/.kube/config" helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+          --namespace "{{ aws_lbc_namespace }}" \
+          --create-namespace \
+          --set clusterName="{{ cluster_name }}" \
+          --set region="{{ aws_region }}" \
+          --set vpcId="{{ vpc_id }}" \
           --set serviceAccount.create=true \
-          --set serviceAccount.name={{ aws_lbc_service_account_name }} \
-          --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::{{ aws_account_id }}:role/{{ aws_lbc_role_name }}' \
+          --set serviceAccount.name="{{ aws_lbc_service_account_name }}" \
+          --set-string "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::{{ aws_account_id }}:role/{{ aws_lbc_role_name }}" \
           --wait \
           --timeout 10m
       args:
         executable: /bin/bash
       register: lbc_install
+      changed_when: >
+        'has been upgraded' in lbc_install.stdout or
+        'has been installed' in lbc_install.stdout
 
     - name: Show Helm install result
       ansible.builtin.debug:
         var: lbc_install.stdout_lines
 
     - name: Wait for AWS Load Balancer Controller rollout
-      ansible.builtin.command: >
-        kubectl -n {{ aws_lbc_namespace }}
-        rollout status deployment/aws-load-balancer-controller
-        --timeout=300s
+      ansible.builtin.shell: |
+        set -e
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ aws_lbc_namespace }}" \
+          rollout status deployment/aws-load-balancer-controller \
+          --timeout=300s
+      args:
+        executable: /bin/bash
       changed_when: false
 
     - name: Verify AWS Load Balancer Controller pods
-      ansible.builtin.command: >
-        kubectl -n {{ aws_lbc_namespace }}
-        get pods -l app.kubernetes.io/name=aws-load-balancer-controller -o wide
+      ansible.builtin.shell: |
+        set -e
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ aws_lbc_namespace }}" \
+          get pods -l app.kubernetes.io/name=aws-load-balancer-controller -o wide
+      args:
+        executable: /bin/bash
       changed_when: false
       register: lbc_pods
 
@@ -155,12 +237,25 @@
         var: lbc_pods.stdout_lines
 
     - name: Verify service account annotation
-      ansible.builtin.command: >
-        kubectl -n {{ aws_lbc_namespace }}
-        get serviceaccount {{ aws_lbc_service_account_name }} -o yaml
+      ansible.builtin.shell: |
+        set -e
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ aws_lbc_namespace }}" \
+          get serviceaccount "{{ aws_lbc_service_account_name }}" \
+          -o yaml
+      args:
+        executable: /bin/bash
       changed_when: false
       register: lbc_sa
 
     - name: Show service account
       ansible.builtin.debug:
         var: lbc_sa.stdout_lines
+
+    - name: Show next command
+      ansible.builtin.debug:
+        msg:
+          - "AWS Load Balancer Controller is ready."
+          - "Namespace: {{ aws_lbc_namespace }}"
+          - "ServiceAccount: {{ aws_lbc_service_account_name }}"
+          - "IAM Role: arn:aws:iam::{{ aws_account_id }}:role/{{ aws_lbc_role_name }}"

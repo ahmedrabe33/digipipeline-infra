@@ -3,39 +3,110 @@
   hosts: bastion
   gather_facts: false
 
+  vars:
+    argocd_namespace: argocd
+    argocd_release_name: argocd
+    argocd_helm_repo_name: argo
+    argocd_helm_repo_url: https://argoproj.github.io/argo-helm
+    kubeconfig_path: "$HOME/.kube/config"
+
   tasks:
-    - name: Update kubeconfig on Bastion
-      ansible.builtin.command: >
-        aws eks update-kubeconfig
-        --region {{ aws_region }}
-        --name {{ cluster_name }}
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - aws_region is defined
+          - cluster_name is defined
+        fail_msg: "Missing aws_region or cluster_name. Run 00-rebuild-infra.yml first."
+
+    - name: Check required tools on Bastion
+      ansible.builtin.shell: |
+        set -e
+        command -v aws
+        command -v kubectl
+        command -v helm
+      args:
+        executable: /bin/bash
       changed_when: false
 
-    - name: Add Argo CD Helm repo
-      ansible.builtin.command: helm repo add argo https://argoproj.github.io/argo-helm
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.shell: |
+        set -e
+
+        mkdir -p "$HOME/.kube"
+
+        aws eks update-kubeconfig \
+          --region "{{ aws_region }}" \
+          --name "{{ cluster_name }}" \
+          --alias "{{ cluster_name }}" \
+          --kubeconfig "$HOME/.kube/config"
+
+        chmod 700 "$HOME/.kube"
+        chmod 600 "$HOME/.kube/config"
+
+        kubectl --kubeconfig "$HOME/.kube/config" config current-context
+      args:
+        executable: /bin/bash
+      register: kubeconfig_output
+      changed_when: false
+
+    - name: Show kubeconfig context
+      ansible.builtin.debug:
+        var: kubeconfig_output.stdout_lines
+
+    - name: Add Argo CD Helm repo if missing
+      ansible.builtin.shell: |
+        set -e
+
+        if helm repo list | awk '{print $1}' | grep -qx "{{ argocd_helm_repo_name }}"; then
+          echo "Argo CD Helm repo already exists"
+        else
+          helm repo add "{{ argocd_helm_repo_name }}" "{{ argocd_helm_repo_url }}"
+        fi
+      args:
+        executable: /bin/bash
       register: argo_repo
       changed_when: "'has been added' in argo_repo.stdout"
-      failed_when:
-        - argo_repo.rc != 0
-        - "'already exists' not in argo_repo.stderr"
 
     - name: Update Helm repos
       ansible.builtin.command: helm repo update
       changed_when: false
 
     - name: Install or upgrade Argo CD
-      ansible.builtin.command: >
-        helm upgrade --install argocd argo/argo-cd
-        --namespace argocd
-        --create-namespace
-        --set server.service.type=ClusterIP
-        --wait
-        --timeout 10m
+      ansible.builtin.shell: |
+        set -e
+
+        KUBECONFIG="$HOME/.kube/config" helm upgrade --install "{{ argocd_release_name }}" "{{ argocd_helm_repo_name }}/argo-cd" \
+          --namespace "{{ argocd_namespace }}" \
+          --create-namespace \
+          --set server.service.type=ClusterIP \
+          --wait \
+          --timeout 10m
+      args:
+        executable: /bin/bash
       register: argocd_install
-      changed_when: "'has been upgraded' in argocd_install.stdout or 'has been installed' in argocd_install.stdout"
+      changed_when: >
+        'has been upgraded' in argocd_install.stdout or
+        'has been installed' in argocd_install.stdout
+
+    - name: Wait for Argo CD pods to be ready
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ argocd_namespace }}" \
+          wait --for=condition=Ready pod \
+          --all \
+          --timeout=600s
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     - name: Get Argo CD pods
-      ansible.builtin.command: kubectl get pods -n argocd
+      ansible.builtin.shell: |
+        set -e
+        kubectl --kubeconfig "$HOME/.kube/config" get pods -n "{{ argocd_namespace }}" -o wide
+      args:
+        executable: /bin/bash
       changed_when: false
       register: argocd_pods
 
@@ -44,10 +115,21 @@
         var: argocd_pods.stdout_lines
 
     - name: Get Argo CD services
-      ansible.builtin.command: kubectl get svc -n argocd
+      ansible.builtin.shell: |
+        set -e
+        kubectl --kubeconfig "$HOME/.kube/config" get svc -n "{{ argocd_namespace }}"
+      args:
+        executable: /bin/bash
       changed_when: false
       register: argocd_svc
 
     - name: Show Argo CD services
       ansible.builtin.debug:
         var: argocd_svc.stdout_lines
+
+    - name: Show next command
+      ansible.builtin.debug:
+        msg:
+          - "Argo CD is installed."
+          - "Namespace: {{ argocd_namespace }}"
+          - "Next: ansible-playbook playbooks/02-argocd-password.yml"

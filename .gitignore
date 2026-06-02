@@ -2,25 +2,40 @@
 **/.terraform/
 *.tfstate
 *.tfstate.*
-*.tfplan
-tfplan
-destroy.tfplan
 crash.log
 crash.*.log
 .terraform.lock.hcl
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
 
-# Secrets
+# Secrets / keys
 *.pem
 *.key
-*.pub
+id_rsa
+id_rsa.pub
+*.p12
+*.jks
+*.kubeconfig
+kubeconfig
+.kube/
 .env
-*.tfvars
+.env.*
+!.env.example
 
-# Ansible retry/cache
-*.retry
+# Ansible sensitive runtime files
+ansible/inventories/*/hosts.ini
+ansible/**/*.retry
+ansible/**/vault*.yml
+ansible/**/secrets*.yml
+ansible/**/password*.yml
+
+# Logs / cache
+*.log
 __pycache__/
-.ansible/
-
-# OS / Editor
+*.pyc
 .DS_Store
 .vscode/

@@ -1,0 +1,5 @@
+---
+- import_playbook: 24-install-sonarqube.yml
+- import_playbook: 25-install-trivy.yml
+- import_playbook: 27-verify-devsecops.yml
+- import_playbook: 26-open-sonarqube-access.yml

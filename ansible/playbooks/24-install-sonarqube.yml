@@ -1,0 +1,180 @@
+---
+- name: Allow Jenkins agents to reach SonarQube on Jenkins controller
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  vars:
+    jenkins_aws_region: us-west-2
+    sonar_port: 9000
+
+  tasks:
+    - name: Set Jenkins inventory facts
+      ansible.builtin.set_fact:
+        jenkins_controller_host: "{{ groups['jenkins_controller'][0] }}"
+        jenkins_agent_hosts: "{{ groups['jenkins_agents'] | default([]) }}"
+
+    - name: Set Jenkins IP facts
+      ansible.builtin.set_fact:
+        jenkins_controller_public_ip: "{{ hostvars[jenkins_controller_host].ansible_host }}"
+        jenkins_agent_private_ips: "{{ jenkins_agent_hosts | map('extract', hostvars, 'ansible_host') | list }}"
+
+    - name: Get Jenkins controller security group
+      ansible.builtin.shell: |
+        aws ec2 describe-instances \
+          --region "{{ jenkins_aws_region }}" \
+          --profile "{{ aws_profile | default('default') }}" \
+          --filters "Name=ip-address,Values={{ jenkins_controller_public_ip }}" \
+          --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
+          --output text
+      args:
+        executable: /bin/bash
+      register: jenkins_controller_sg
+      changed_when: false
+
+    - name: Show Jenkins controller security group
+      ansible.builtin.debug:
+        msg:
+          - "Jenkins Controller Public IP: {{ jenkins_controller_public_ip }}"
+          - "Jenkins Controller SG: {{ jenkins_controller_sg.stdout }}"
+          - "Agent Private IPs: {{ jenkins_agent_private_ips }}"
+
+    - name: Allow SonarQube port from Jenkins agents
+      ansible.builtin.shell: |
+        set -e
+
+        aws ec2 authorize-security-group-ingress \
+          --region "{{ jenkins_aws_region }}" \
+          --profile "{{ aws_profile | default('default') }}" \
+          --group-id "{{ jenkins_controller_sg.stdout }}" \
+          --protocol tcp \
+          --port "{{ sonar_port }}" \
+          --cidr "{{ item }}/32" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      loop: "{{ jenkins_agent_private_ips }}"
+      changed_when: false
+
+
+- name: Install SonarQube on Jenkins controller
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  vars:
+    sonarqube_container_name: sonarqube
+    sonarqube_image: sonarqube:lts-community
+    sonarqube_port: 9000
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.dnf:
+        name:
+          - docker
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Set vm.max_map_count for SonarQube
+      ansible.builtin.shell: |
+        set -e
+        sysctl -w vm.max_map_count=262144
+        grep -q "vm.max_map_count=262144" /etc/sysctl.conf || echo "vm.max_map_count=262144" >> /etc/sysctl.conf
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Create SonarQube Docker volumes
+      ansible.builtin.shell: |
+        docker volume create sonarqube_data
+        docker volume create sonarqube_extensions
+        docker volume create sonarqube_logs
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Pull SonarQube image
+      ansible.builtin.command: docker pull "{{ sonarqube_image }}"
+      register: sonar_pull
+      changed_when: "'Downloaded newer image' in sonar_pull.stdout"
+
+    - name: Check if SonarQube container exists
+      ansible.builtin.shell: docker inspect "{{ sonarqube_container_name }}" >/dev/null 2>&1
+      register: sonar_container_check
+      failed_when: false
+      changed_when: false
+
+    - name: Run SonarQube container if missing
+      ansible.builtin.shell: |
+        docker run -d \
+          --name "{{ sonarqube_container_name }}" \
+          --restart unless-stopped \
+          -p {{ sonarqube_port }}:9000 \
+          -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+          -e SONAR_WEB_JAVAOPTS="-Xms128m -Xmx512m" \
+          -e SONAR_CE_JAVAOPTS="-Xms128m -Xmx512m" \
+          -v sonarqube_data:/opt/sonarqube/data \
+          -v sonarqube_extensions:/opt/sonarqube/extensions \
+          -v sonarqube_logs:/opt/sonarqube/logs \
+          "{{ sonarqube_image }}"
+      args:
+        executable: /bin/bash
+      when: sonar_container_check.rc != 0
+
+    - name: Start SonarQube container if stopped
+      ansible.builtin.command: docker start "{{ sonarqube_container_name }}"
+      register: sonar_start
+      changed_when: "'{{ sonarqube_container_name }}' in sonar_start.stdout"
+      failed_when: false
+
+    - name: Wait for SonarQube port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ sonarqube_port }}"
+        timeout: 600
+        delay: 10
+
+    - name: Wait for SonarQube to be UP
+      ansible.builtin.shell: |
+        set -e
+
+        for i in {1..90}; do
+          STATUS=$(curl -s http://127.0.0.1:{{ sonarqube_port }}/api/system/status || true)
+          echo "$STATUS"
+
+          echo "$STATUS" | grep -q '"status":"UP"' && exit 0
+
+          sleep 10
+        done
+
+        docker logs "{{ sonarqube_container_name }}" --tail 120
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show SonarQube status
+      ansible.builtin.shell: |
+        docker ps --filter "name={{ sonarqube_container_name }}"
+        curl -s http://127.0.0.1:{{ sonarqube_port }}/api/system/status || true
+      args:
+        executable: /bin/bash
+      register: sonar_status
+      changed_when: false
+
+    - name: Print SonarQube info
+      ansible.builtin.debug:
+        msg:
+          - "{{ sonar_status.stdout_lines }}"
+          - "SonarQube is installed."
+          - "Open it locally with playbooks/26-open-sonarqube-access.yml"

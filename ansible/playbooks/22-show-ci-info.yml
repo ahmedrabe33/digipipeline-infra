@@ -4,12 +4,58 @@
   become: true
   gather_facts: false
 
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  vars:
+    jenkins_container_name: jenkins-controller
+
   tasks:
-    - name: Read Jenkins initial admin password
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - jenkins_url is defined
+          - jenkins_controller_public_ip is defined
+          - jenkins_controller_private_ip is defined
+          - jenkins_agent_private_ips is defined
+          - ecr_repository_name is defined
+          - ecr_repository_url is defined
+          - bastion_key_path is defined
+        fail_msg: "Missing CI variables. Run 00-rebuild-infra.yml first."
+
+    - name: Check Docker exists on Jenkins controller
+      ansible.builtin.command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check Jenkins container status
       ansible.builtin.shell: |
-        docker exec jenkins-controller cat /var/jenkins_home/secrets/initialAdminPassword 2>/dev/null || true
+        docker ps -a --filter "name=^/{{ jenkins_container_name }}$" \
+          --format "table {{ '{{.Names}}' }}\t{{ '{{.Status}}' }}\t{{ '{{.Ports}}' }}" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: jenkins_container_status
+      changed_when: false
+
+    - name: Read Jenkins initial admin password if available
+      ansible.builtin.shell: |
+        set -e
+
+        if docker exec "{{ jenkins_container_name }}" test -f /var/jenkins_home/secrets/initialAdminPassword 2>/dev/null; then
+          docker exec "{{ jenkins_container_name }}" cat /var/jenkins_home/secrets/initialAdminPassword
+        else
+          echo "initial-password-not-found-or-jenkins-already-configured"
+        fi
+      args:
+        executable: /bin/bash
       register: jenkins_password
       changed_when: false
+      failed_when: false
+
+    - name: Show Jenkins container status
+      ansible.builtin.debug:
+        var: jenkins_container_status.stdout_lines
 
     - name: Show CI information
       ansible.builtin.debug:
@@ -20,6 +66,8 @@
           - "ECR Repository Name: {{ ecr_repository_name }}"
           - "ECR Repository URL: {{ ecr_repository_url }}"
           - "Jenkins Controller Public IP: {{ jenkins_controller_public_ip }}"
+          - "Jenkins Controller Private IP: {{ jenkins_controller_private_ip }}"
           - "Jenkins Agent Private IPs: {{ jenkins_agent_private_ips }}"
-          - "In Jenkins, add SSH agents using user: jenkins"
-          - "Use your private key: ~/.ssh/devops-ha-eks-bastion-key.pem"
+          - "Jenkins SSH Agent Username: jenkins"
+          - "Jenkins SSH Private Key on local machine: {{ bastion_key_path }}"
+          - "Use this key inside Jenkins credentials as SSH Username with private key."

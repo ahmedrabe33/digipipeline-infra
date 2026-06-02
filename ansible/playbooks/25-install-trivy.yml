@@ -1,0 +1,73 @@
+---
+- name: Install Trivy on Jenkins agents
+  hosts: jenkins_agents
+  become: true
+  gather_facts: false
+
+  vars:
+    trivy_image: aquasec/trivy:latest
+    jenkins_user: jenkins
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.dnf:
+        name:
+          - docker
+          - git
+          - jq
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure jenkins user is in docker group
+      ansible.builtin.user:
+        name: "{{ jenkins_user }}"
+        groups: docker
+        append: true
+
+    - name: Pull Trivy Docker image
+      ansible.builtin.command: docker pull "{{ trivy_image }}"
+      register: trivy_pull
+      changed_when: "'Downloaded newer image' in trivy_pull.stdout"
+
+    - name: Create Trivy wrapper command
+      ansible.builtin.copy:
+        dest: /usr/local/bin/trivy
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -e
+
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:$PWD" \
+            -v trivy-cache:/root/.cache/ \
+            -w "$PWD" \
+            aquasec/trivy:latest "$@"
+
+    - name: Verify Trivy as root
+      ansible.builtin.command: trivy --version
+      register: trivy_root_version
+      changed_when: false
+
+    - name: Verify Trivy as jenkins user
+      ansible.builtin.shell: |
+        cd /home/jenkins
+        sudo -u "{{ jenkins_user }}" -H trivy --version
+      args:
+        executable: /bin/bash
+      register: trivy_jenkins_version
+      changed_when: false
+
+    - name: Show Trivy version
+      ansible.builtin.debug:
+        msg:
+          - "{{ trivy_root_version.stdout_lines }}"
+          - "{{ trivy_jenkins_version.stdout_lines }}"
