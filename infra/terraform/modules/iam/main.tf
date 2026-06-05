@@ -120,3 +120,10 @@ resource "aws_iam_instance_profile" "bastion_profile" {
   name = "${var.cluster_name}-bastion-profile"
   role = aws_iam_role.bastion_role.name
 }
+# --------------------------------------------------
+# EBS CSI Driver Policy for EKS Nodes
+# --------------------------------------------------
+resource "aws_iam_role_policy_attachment" "node_ebs_csi_policy" {
+  role       = aws_iam_role.eks_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}

@@ -1,5 +1,5 @@
 ---
-- name: Bootstrap demo app from digipipeline-gitops and print access info
+- name: Bootstrap DigiPipeline GitOps app in Argo CD
   hosts: bastion
   gather_facts: false
 
@@ -7,14 +7,12 @@
     - ../inventories/dev/group_vars/all.yml
 
   vars:
-    app_name: "demo-app"
-    app_namespace: "demo-app"
-    app_ingress_name: "demo-app-ingress"
-    gitops_repo_url: "https://github.com/ahmedrabe33/digipipeline-gitops.git"
-    gitops_app_path: "apps/demo-app"
     argocd_namespace: "argocd"
-    monitoring_namespace: "monitoring"
-    grafana_secret_name: "kube-prometheus-stack-grafana"
+    app_name: "digipipeline-development"
+    app_namespace: "auraweb-dev"
+    gitops_repo_url: "https://github.com/ahmedrabe33/digipipeline-gitops.git"
+    gitops_target_revision: "main"
+    gitops_app_path: "k8s/overlays/development"
 
   tasks:
     - name: Check required variables
@@ -22,18 +20,7 @@
         that:
           - aws_region is defined
           - cluster_name is defined
-          - bastion_public_ip is defined
-          - bastion_key_path is defined
         fail_msg: "Missing required variables. Run 00-rebuild-infra.yml first."
-
-    - name: Check required tools on Bastion
-      ansible.builtin.shell: |
-        set -e
-        command -v aws
-        command -v kubectl
-      args:
-        executable: /bin/bash
-      changed_when: false
 
     - name: Update kubeconfig on Bastion
       ansible.builtin.shell: |
@@ -49,28 +36,31 @@
 
         chmod 700 "$HOME/.kube"
         chmod 600 "$HOME/.kube/config"
-
-        kubectl --kubeconfig "$HOME/.kube/config" config current-context
       args:
         executable: /bin/bash
-      register: kubeconfig_output
       changed_when: false
 
-    - name: Show kubeconfig context
-      ansible.builtin.debug:
-        var: kubeconfig_output.stdout_lines
-
-    - name: Ensure Argo CD namespace exists
+    - name: Delete old demo app from Argo CD
       ansible.builtin.shell: |
-        set -e
-        kubectl --kubeconfig "$HOME/.kube/config" get namespace "{{ argocd_namespace }}"
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ argocd_namespace }}" \
+          delete application demo-app --ignore-not-found=true
       args:
         executable: /bin/bash
       changed_when: false
 
-    - name: Create Argo CD Application manifest on Bastion
+    - name: Create target namespace
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          create namespace "{{ app_namespace }}" \
+          --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$HOME/.kube/config" apply -f -
+      args:
+        executable: /bin/bash
+
+    - name: Create DigiPipeline Argo CD Application manifest
       ansible.builtin.copy:
-        dest: /tmp/demo-app-application.yaml
+        dest: /tmp/digipipeline-development-application.yaml
         mode: "0644"
         content: |
           apiVersion: argoproj.io/v1alpha1
@@ -82,7 +72,7 @@
             project: default
             source:
               repoURL: {{ gitops_repo_url }}
-              targetRevision: main
+              targetRevision: {{ gitops_target_revision }}
               path: {{ gitops_app_path }}
             destination:
               server: https://kubernetes.default.svc
@@ -93,148 +83,30 @@
                 selfHeal: true
               syncOptions:
                 - CreateNamespace=true
+                - ServerSideApply=true
 
-    - name: Apply Argo CD Application
+    - name: Apply DigiPipeline Argo CD Application
       ansible.builtin.shell: |
-        set -e
-        kubectl --kubeconfig "$HOME/.kube/config" apply -f /tmp/demo-app-application.yaml
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          apply -f /tmp/digipipeline-development-application.yaml
       args:
         executable: /bin/bash
       register: app_apply
-      changed_when: "'created' in app_apply.stdout or 'configured' in app_apply.stdout"
 
-    - name: Show Application apply result
+    - name: Show apply result
       ansible.builtin.debug:
         var: app_apply.stdout_lines
 
-    - name: Wait for Argo CD Application to appear
+    - name: Show Argo CD applications
       ansible.builtin.shell: |
-        set -e
         kubectl --kubeconfig "$HOME/.kube/config" \
           -n "{{ argocd_namespace }}" \
-          get application "{{ app_name }}"
+          get applications
       args:
         executable: /bin/bash
-      register: app_exists
+      register: argo_apps
       changed_when: false
-      retries: 30
-      delay: 10
-      until: app_exists.rc == 0
 
-    - name: Wait for Argo CD Application sync and health
-      ansible.builtin.shell: |
-        set -e
-
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ argocd_namespace }}" \
-          get application "{{ app_name }}" \
-          -o jsonpath='{.status.sync.status} {.status.health.status}'
-      args:
-        executable: /bin/bash
-      register: app_status
-      changed_when: false
-      retries: 60
-      delay: 10
-      until:
-        - "'Synced' in app_status.stdout"
-        - "'Healthy' in app_status.stdout"
-      failed_when: false
-
-    - name: Show Argo CD Application status
+    - name: Print Argo CD applications
       ansible.builtin.debug:
-        msg:
-          - "Argo CD Application status: {{ app_status.stdout | default('unknown') }}"
-          - "If not Synced/Healthy yet, Kubernetes rollout checks will continue."
-
-    - name: Wait for app namespace
-      ansible.builtin.shell: |
-        set -e
-        kubectl --kubeconfig "$HOME/.kube/config" get namespace "{{ app_namespace }}"
-      args:
-        executable: /bin/bash
-      changed_when: false
-      register: ns_check
-      retries: 30
-      delay: 10
-      until: ns_check.rc == 0
-
-    - name: Wait for app deployment rollout
-      ansible.builtin.shell: |
-        set -e
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ app_namespace }}" \
-          rollout status deployment/"{{ app_name }}" \
-          --timeout=300s
-      args:
-        executable: /bin/bash
-      changed_when: false
-
-    - name: Show app pods
-      ansible.builtin.shell: |
-        set -e
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ app_namespace }}" \
-          get pods -o wide
-      args:
-        executable: /bin/bash
-      register: app_pods
-      changed_when: false
-
-    - name: Print app pods
-      ansible.builtin.debug:
-        var: app_pods.stdout_lines
-
-    - name: Wait for ALB hostname
-      ansible.builtin.shell: |
-        set -e
-
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ app_namespace }}" \
-          get ingress "{{ app_ingress_name }}" \
-          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-      args:
-        executable: /bin/bash
-      register: alb_hostname
-      changed_when: false
-      retries: 45
-      delay: 20
-      until: alb_hostname.stdout | length > 0
-
-    - name: Get Argo CD admin password if initial secret exists
-      ansible.builtin.shell: |
-        set -e
-
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ argocd_namespace }}" \
-          get secret argocd-initial-admin-secret \
-          -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true
-      args:
-        executable: /bin/bash
-      register: argocd_password
-      changed_when: false
-
-    - name: Get Grafana admin password if monitoring exists
-      ansible.builtin.shell: |
-        set -e
-
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ monitoring_namespace }}" \
-          get secret "{{ grafana_secret_name }}" \
-          -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d || true
-      args:
-        executable: /bin/bash
-      register: grafana_password
-      changed_when: false
-
-    - name: Show final access information
-      ansible.builtin.debug:
-        msg:
-          - "APP URL: http://{{ alb_hostname.stdout }}"
-          - "ARGO CD URL: https://localhost:8080"
-          - "ARGO CD USERNAME: admin"
-          - "ARGO CD PASSWORD: {{ argocd_password.stdout | default('not-found') }}"
-          - "GRAFANA URL: http://localhost:3000"
-          - "GRAFANA USERNAME: admin"
-          - "GRAFANA PASSWORD: {{ grafana_password.stdout | default('not-found') }}"
-          - "To open dashboards from local, run:"
-          - "cd {{ ansible_dir | default('/home/u1/digipipeline-workspace/digipipeline-infra/ansible') }} && ansible-playbook -i inventories/dev/hosts.ini playbooks/open-all-access.yml"
+        var: argo_apps.stdout_lines

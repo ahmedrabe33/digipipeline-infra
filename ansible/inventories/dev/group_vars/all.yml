@@ -4,21 +4,21 @@ jenkins_aws_region: "us-west-2"
 aws_account_id: "429104603739"
 
 cluster_name: "devops-ha-eks"
-vpc_id: "vpc-041bc5b455a2c942f"
+vpc_id: "vpc-05086d7229c8dd528"
 
-bastion_public_ip: "34.201.55.23"
-bastion_private_ip: "10.0.10.185"
-bastion_key_path: "/home/u1/.ssh/devops-ha-eks-bastion-key.pem"
+bastion_public_ip: "44.211.60.249"
+bastion_private_ip: "10.0.10.142"
+bastion_key_path: "/home/ahmedrabie/.ssh/devops-ha-eks-bastion-key.pem"
 
 ecr_repository_name: "digipipeline-app"
 ecr_repository_url: "429104603739.dkr.ecr.us-east-1.amazonaws.com/digipipeline-app"
 
-jenkins_url: "http://35.167.30.182:8080"
-jenkins_controller_public_ip: "35.167.30.182"
-jenkins_controller_private_ip: "10.20.10.39"
+jenkins_url: "http://54.190.167.238:8080"
+jenkins_controller_public_ip: "54.190.167.238"
+jenkins_controller_private_ip: "10.20.10.149"
 jenkins_agent_private_ips:
-  - "10.20.10.170"
-  - "10.20.20.254"
+  - "10.20.10.67"
+  - "10.20.20.126"
 
 aws_lbc_policy_name: "AWSLoadBalancerControllerIAMPolicy-devops-ha-eks"
 aws_lbc_role_name: "AmazonEKSLoadBalancerControllerRole-devops-ha-eks"

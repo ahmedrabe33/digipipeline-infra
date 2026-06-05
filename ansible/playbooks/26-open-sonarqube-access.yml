@@ -59,6 +59,6 @@
       ansible.builtin.debug:
         msg:
           - "SonarQube URL: http://localhost:{{ sonar_local_port }}"
-          - "Default username: admin"
-          - "Default password: admin"
+          - "Username: admin"
+          - "Password: Admin@12345"
           - "After first login, change the password and create token."

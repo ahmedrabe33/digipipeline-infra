@@ -1,0 +1,145 @@
+---
+- name: Start monitoring port-forwards on Bastion
+  hosts: bastion
+  gather_facts: false
+  become: false
+
+  vars:
+    monitoring_namespace: monitoring
+    remote_grafana_port: 3001
+    remote_prometheus_port: 9091
+
+  tasks:
+    - name: Find Grafana service by port 80
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "$HOME/.kube/config" -n "{{ monitoring_namespace }}" get svc \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.ports[*]}{.port}{" "}{end}{"\n"}{end}' \
+        | awk '/grafana/ && / 80 / {print $1; exit}'
+      register: grafana_svc
+      changed_when: false
+
+    - name: Find Prometheus service by port 9090
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "$HOME/.kube/config" -n "{{ monitoring_namespace }}" get svc \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.ports[*]}{.port}{" "}{end}{"\n"}{end}' \
+        | awk '/prometheus/ && / 9090 / && !/operator/ && !/alertmanager/ {print $1; exit}'
+      register: prometheus_svc
+      changed_when: false
+
+    - name: Show selected services
+      ansible.builtin.debug:
+        msg:
+          - "Grafana service: {{ grafana_svc.stdout }}"
+          - "Prometheus service: {{ prometheus_svc.stdout }}"
+
+    - name: Fail if services not found
+      ansible.builtin.fail:
+        msg: "Grafana or Prometheus service not found."
+      when: grafana_svc.stdout == "" or prometheus_svc.stdout == ""
+
+    - name: Kill old kubectl port-forwards safely
+      ansible.builtin.shell: |
+        set +e
+        ps -eo pid=,comm=,args= \
+        | awk '$2=="kubectl" && /port-forward/ && /monitoring/ {print $1}' \
+        | xargs -r kill -TERM
+        sleep 2
+        exit 0
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Start Grafana port-forward on Bastion
+      ansible.builtin.shell: |
+        nohup kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ monitoring_namespace }}" \
+          port-forward --address 127.0.0.1 \
+          "svc/{{ grafana_svc.stdout }}" \
+          "{{ remote_grafana_port }}:80" \
+          > /tmp/grafana-port-forward.log 2>&1 &
+      args:
+        executable: /bin/bash
+
+    - name: Start Prometheus port-forward on Bastion
+      ansible.builtin.shell: |
+        nohup kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ monitoring_namespace }}" \
+          port-forward --address 127.0.0.1 \
+          "svc/{{ prometheus_svc.stdout }}" \
+          "{{ remote_prometheus_port }}:9090" \
+          > /tmp/prometheus-port-forward.log 2>&1 &
+      args:
+        executable: /bin/bash
+
+    - name: Wait for Grafana on Bastion
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ remote_grafana_port }}"
+        timeout: 60
+
+    - name: Wait for Prometheus on Bastion
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ remote_prometheus_port }}"
+        timeout: 60
+
+
+- name: Open local SSH tunnels from PC
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    remote_grafana_port: 3001
+    remote_prometheus_port: 9091
+
+  tasks:
+    - name: Set Bastion connection facts
+      ansible.builtin.set_fact:
+        bastion_host: "{{ hostvars[groups['bastion'][0]].ansible_host }}"
+        bastion_user: "{{ hostvars[groups['bastion'][0]].ansible_user | default('ubuntu') }}"
+        bastion_key: "{{ hostvars[groups['bastion'][0]].ansible_ssh_private_key_file | default(lookup('env', 'HOME') + '/.ssh/devops-ha-eks-bastion-key.pem') }}"
+
+    - name: Kill old local tunnels safely
+      ansible.builtin.shell: |
+        set +e
+        fuser -k 3000/tcp >/dev/null 2>&1 || true
+        fuser -k 9090/tcp >/dev/null 2>&1 || true
+        sleep 1
+        exit 0
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Start local SSH tunnels
+      ansible.builtin.shell: |
+        ssh -f -N \
+          -o ExitOnForwardFailure=yes \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o IdentitiesOnly=yes \
+          -i "{{ bastion_key }}" \
+          -L 3000:127.0.0.1:{{ remote_grafana_port }} \
+          -L 9090:127.0.0.1:{{ remote_prometheus_port }} \
+          "{{ bastion_user }}@{{ bastion_host }}"
+      args:
+        executable: /bin/bash
+
+    - name: Wait for local Grafana
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 3000
+        timeout: 60
+
+    - name: Wait for local Prometheus
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 9090
+        timeout: 60
+
+    - name: Show URLs
+      ansible.builtin.debug:
+        msg:
+          - "Grafana: http://localhost:3000"
+          - "Prometheus: http://localhost:9090"
+          - "Grafana username: admin"
+          - "Grafana password: admin123"

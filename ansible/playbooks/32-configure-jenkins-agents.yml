@@ -1,0 +1,231 @@
+---
+- name: Configure Jenkins SSH credential and agents
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  vars:
+    jenkins_container_name: jenkins-controller
+
+    jenkins_agent_credential_id: jenkins-agent-ssh-key
+    jenkins_agent_ssh_user: jenkins
+    jenkins_agent_remote_fs: /home/jenkins/agent
+    jenkins_agent_labels: "linux docker node-agent"
+    jenkins_agent_executors: 2
+
+    local_agent_private_key: "{{ lookup('env', 'HOME') + '/.ssh/devops-ha-eks-bastion-key.pem' }}"
+
+  tasks:
+    - name: Fail if no Jenkins agents exist in inventory
+      ansible.builtin.fail:
+        msg: "No hosts found in [jenkins_agents]"
+      when: groups['jenkins_agents'] | default([]) | length == 0
+
+    - name: Check local private key exists
+      ansible.builtin.stat:
+        path: "{{ local_agent_private_key }}"
+      delegate_to: localhost
+      become: false
+      register: key_stat
+
+    - name: Fail if private key is missing
+      ansible.builtin.fail:
+        msg: "Private key not found: {{ local_agent_private_key }}"
+      when: not key_stat.stat.exists
+
+    - name: Check Jenkins container is running
+      ansible.builtin.shell: |
+        docker ps --format '{{ "{{.Names}}" }}' | grep -x "{{ jenkins_container_name }}"
+      register: jenkins_container_check
+      changed_when: false
+
+    - name: Copy private key temporarily to Jenkins controller
+      ansible.builtin.copy:
+        src: "{{ local_agent_private_key }}"
+        dest: /tmp/jenkins-agent-key.pem
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Copy private key into Jenkins container
+      ansible.builtin.shell: |
+        set -e
+
+        docker cp /tmp/jenkins-agent-key.pem {{ jenkins_container_name }}:/tmp/jenkins-agent-key.pem
+
+        docker exec -u root {{ jenkins_container_name }} sh -c '
+          chown 1000:1000 /tmp/jenkins-agent-key.pem
+          chmod 600 /tmp/jenkins-agent-key.pem
+          mkdir -p /var/jenkins_home/init.groovy.d
+          chown -R 1000:1000 /var/jenkins_home/init.groovy.d
+        '
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Create Jenkins Groovy script for credential and agents
+      ansible.builtin.copy:
+        dest: /tmp/configure-jenkins-agents.groovy
+        mode: "0644"
+        content: |
+          import jenkins.model.Jenkins
+          import hudson.model.Node
+          import hudson.slaves.DumbSlave
+          import hudson.slaves.RetentionStrategy
+          import hudson.plugins.sshslaves.SSHLauncher
+          import hudson.plugins.sshslaves.verifiers.NonVerifyingKeyVerificationStrategy
+
+          import com.cloudbees.plugins.credentials.CredentialsProvider
+          import com.cloudbees.plugins.credentials.CredentialsScope
+          import com.cloudbees.plugins.credentials.SystemCredentialsProvider
+          import com.cloudbees.plugins.credentials.common.StandardCredentials
+          import com.cloudbees.plugins.credentials.domains.Domain
+          import com.cloudbees.jenkins.plugins.sshcredentials.impl.BasicSSHUserPrivateKey
+
+          def jenkins = Jenkins.getInstanceOrNull()
+
+          if (jenkins == null) {
+            throw new RuntimeException("Jenkins instance is not ready")
+          }
+
+          def credentialId = "{{ jenkins_agent_credential_id }}"
+          def sshUser = "{{ jenkins_agent_ssh_user }}"
+          def privateKeyFile = new File("/tmp/jenkins-agent-key.pem")
+
+          if (!privateKeyFile.exists()) {
+            throw new RuntimeException("Private key file not found inside Jenkins container")
+          }
+
+          def privateKey = privateKeyFile.text
+
+          def keySource = new BasicSSHUserPrivateKey.DirectEntryPrivateKeySource(privateKey)
+
+          def newCredential = new BasicSSHUserPrivateKey(
+            CredentialsScope.GLOBAL,
+            credentialId,
+            sshUser,
+            keySource,
+            "",
+            "Jenkins agents SSH private key managed by Ansible"
+          )
+
+          def store = SystemCredentialsProvider.getInstance().getStore()
+
+          def existingCredential = CredentialsProvider.lookupCredentials(
+            StandardCredentials.class,
+            jenkins,
+            null,
+            null
+          ).find { it.id == credentialId }
+
+          if (existingCredential == null) {
+            store.addCredentials(Domain.global(), newCredential)
+            println("Created Jenkins credential: " + credentialId)
+          } else {
+            store.updateCredentials(Domain.global(), existingCredential, newCredential)
+            println("Updated Jenkins credential: " + credentialId)
+          }
+
+          def agents = [
+          {% for host in groups['jenkins_agents'] | default([]) %}
+            [
+              name: "{{ host }}",
+              host: "{{ hostvars[host].ansible_host }}",
+              labels: "{{ jenkins_agent_labels }}"
+            ],
+          {% endfor %}
+          ]
+
+          agents.each { agent ->
+            def existingNode = jenkins.getNode(agent.name)
+
+            if (existingNode != null) {
+              jenkins.removeNode(existingNode)
+              println("Removed existing node: " + agent.name)
+            }
+
+            def launcher = new SSHLauncher(
+              agent.host,
+              22,
+              credentialId,
+              null,
+              null,
+              null,
+              null,
+              60,
+              10,
+              15,
+              new NonVerifyingKeyVerificationStrategy()
+            )
+
+            def node = new DumbSlave(
+              agent.name,
+              "Jenkins agent managed by Ansible",
+              "{{ jenkins_agent_remote_fs }}",
+              "{{ jenkins_agent_executors }}",
+              Node.Mode.NORMAL,
+              agent.labels,
+              launcher,
+              new RetentionStrategy.Always(),
+              new LinkedList()
+            )
+
+            jenkins.addNode(node)
+            println("Added Jenkins agent: " + agent.name + " -> " + agent.host)
+          }
+
+          jenkins.save()
+
+          privateKeyFile.delete()
+
+          println("Jenkins credential and agents configured successfully")
+
+    - name: Copy Groovy script into Jenkins init directory
+      ansible.builtin.shell: |
+        set -e
+
+        docker cp /tmp/configure-jenkins-agents.groovy \
+          {{ jenkins_container_name }}:/var/jenkins_home/init.groovy.d/configure-jenkins-agents.groovy
+
+        docker exec -u root {{ jenkins_container_name }} sh -c '
+          chown 1000:1000 /var/jenkins_home/init.groovy.d/configure-jenkins-agents.groovy
+        '
+      args:
+        executable: /bin/bash
+
+    - name: Restart Jenkins to apply configuration
+      ansible.builtin.command: docker restart "{{ jenkins_container_name }}"
+
+    - name: Wait for Jenkins to become available
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8080
+        timeout: 300
+        delay: 30
+
+    - name: Remove temporary Groovy script from Jenkins container
+      ansible.builtin.shell: |
+        docker exec -u root {{ jenkins_container_name }} sh -c '
+          rm -f /var/jenkins_home/init.groovy.d/configure-jenkins-agents.groovy
+          rm -f /tmp/jenkins-agent-key.pem
+        '
+      args:
+        executable: /bin/bash
+
+    - name: Remove temporary private key from Jenkins controller host
+      ansible.builtin.file:
+        path: /tmp/jenkins-agent-key.pem
+        state: absent
+
+    - name: Show configured Jenkins nodes
+      ansible.builtin.shell: |
+        docker exec {{ jenkins_container_name }} sh -c '
+          ls -1 /var/jenkins_home/nodes 2>/dev/null || true
+        '
+      register: jenkins_nodes
+      changed_when: false
+
+    - name: Print Jenkins nodes
+      ansible.builtin.debug:
+        var: jenkins_nodes.stdout_lines

@@ -1,0 +1,144 @@
+---
+# Master playbook for DigiPipeline
+# Run from local machine only:
+# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml
+
+# Optional full infrastructure rebuild:
+# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags infra
+
+- import_playbook: 00-ensure-keypairs.yml
+  tags:
+    - keys
+    - all
+
+# Disabled by default for safety.
+# Run only with: --tags infra
+- import_playbook: 00-rebuild-infra.yml
+  tags:
+    - never
+    - infra
+
+- import_playbook: 00-verify-cluster.yml
+  tags:
+    - verify
+    - cluster
+    - all
+
+- import_playbook: 01-install-argocd.yml
+  tags:
+    - argocd
+    - gitops
+    - all
+
+- import_playbook: 02-argocd-password.yml
+  tags:
+    - argocd
+    - access
+    - all
+
+- import_playbook: 03-install-aws-load-balancer-controller.yml
+  tags:
+    - alb
+    - platform
+    - all
+
+- import_playbook: 06-install-karpenter.yml
+  tags:
+    - karpenter
+    - platform
+    - all
+
+- import_playbook: 09-install-monitoring.yml
+  tags:
+    - monitoring
+    - all
+
+- import_playbook: 10-install-platform.yml
+  tags:
+    - platform
+    - all
+
+- import_playbook: 11-bootstrap-gitops-app.yml
+  tags:
+    - gitops
+    - argocd
+    - all
+
+- import_playbook: 20-install-jenkins-controller.yml
+  tags:
+    - jenkins
+    - ci
+    - all
+
+- import_playbook: 21-prepare-jenkins-agents.yml
+  tags:
+    - jenkins
+    - agents
+    - ci
+    - all
+
+- import_playbook: 24-install-sonarqube.yml
+  tags:
+    - sonarqube
+    - devsecops
+    - all
+
+- import_playbook: 25-install-trivy.yml
+  tags:
+    - trivy
+    - devsecops
+    - all
+
+- import_playbook: 27-setup-sonarqube-for-jenkins.yml
+  tags:
+    - sonarqube
+    - jenkins
+    - devsecops
+    - all
+
+- import_playbook: 28-configure-prometheus.yml
+  tags:
+    - prometheus
+    - monitoring
+    - all
+
+- import_playbook: 30-install-ci.yml
+  tags:
+    - ci
+    - jenkins
+    - all
+
+- import_playbook: 31-install-devsecops.yml
+  tags:
+    - devsecops
+    - all
+
+- import_playbook: 32-configure-jenkins-ecr-iam.yml
+  tags:
+    - ecr
+    - iam
+    - jenkins
+    - all
+
+- import_playbook: 32-configure-jenkins-agents.yml
+  tags:
+    - jenkins
+    - agents
+    - all
+
+- import_playbook: 12-show-access-info.yml
+  tags:
+    - info
+    - access
+    - all
+
+- import_playbook: 22-show-ci-info.yml
+  tags:
+    - info
+    - ci
+    - all
+
+- import_playbook: open-all-access.yml
+  tags:
+    - access
+    - all

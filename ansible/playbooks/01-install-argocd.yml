@@ -91,16 +91,17 @@
     - name: Wait for Argo CD workloads to be ready
       ansible.builtin.shell: |
         set -e
-
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ argocd_namespace }}" \
-          rollout status deployment --all \
-          --timeout=600s
-
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ argocd_namespace }}" \
-          rollout status statefulset --all \
-          --timeout=600s
+    
+        K="kubectl --kubeconfig $HOME/.kube/config"
+    
+        RESOURCES="$($K -n "{{ argocd_namespace }}" get deployment,statefulset -o name)"
+    
+        echo "$RESOURCES"
+    
+        for RESOURCE in $RESOURCES; do
+          echo "Waiting for $RESOURCE"
+          $K -n "{{ argocd_namespace }}" rollout status "$RESOURCE" --timeout=600s
+        done
       args:
         executable: /bin/bash
       changed_when: false

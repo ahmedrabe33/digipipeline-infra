@@ -1,0 +1,334 @@
+---
+- name: Install SonarQube and configure Jenkins integration
+  hosts: jenkins_controller
+  become: true
+  gather_facts: false
+
+  vars:
+    aws_profile: "{{ lookup('env', 'AWS_PROFILE') | default('default', true) }}"
+    jenkins_region: "{{ lookup('env', 'JENKINS_REGION') | default('us-west-2', true) }}"
+
+    jenkins_container_name: jenkins-controller
+
+    sonarqube_container_name: sonarqube
+    sonarqube_image: sonarqube:9.9-community
+    sonarqube_port: 9000
+
+    sonar_admin_user: admin
+    sonar_default_password: admin
+    sonar_admin_password: "Admin@12345"
+
+    sonar_token_name: jenkins
+    sonar_jenkins_credential_id: sonarqube-token
+
+    sonar_project_key: auraweb
+    sonar_project_name: "AuraWeb Platform"
+
+    sonar_server_name: sonarqube
+
+  tasks:
+    - name: Get Jenkins controller private IP
+      ansible.builtin.shell: |
+        hostname -I | awk '{print $1}'
+      register: controller_private_ip
+      changed_when: false
+
+    - name: Set SonarQube URL
+      ansible.builtin.set_fact:
+        sonar_url: "http://{{ controller_private_ip.stdout }}:{{ sonarqube_port }}"
+
+    - name: Configure sysctl for SonarQube Elasticsearch
+      ansible.builtin.shell: |
+        set -e
+        sysctl -w vm.max_map_count=262144
+        echo "vm.max_map_count=262144" > /etc/sysctl.d/99-sonarqube.conf
+      args:
+        executable: /bin/bash
+
+    - name: Create SonarQube Docker volumes
+      ansible.builtin.shell: |
+        docker volume create sonarqube_data
+        docker volume create sonarqube_extensions
+        docker volume create sonarqube_logs
+      args:
+        executable: /bin/bash
+
+    - name: Start SonarQube container
+      ansible.builtin.shell: |
+        set -e
+
+        if docker ps -a --format '{{ "{{.Names}}" }}' | grep -qx "{{ sonarqube_container_name }}"; then
+          docker start "{{ sonarqube_container_name }}" || true
+        else
+          docker run -d \
+            --name "{{ sonarqube_container_name }}" \
+            --restart unless-stopped \
+            --add-host host.docker.internal:host-gateway \
+            -p "{{ sonarqube_port }}:9000" \
+            -v sonarqube_data:/opt/sonarqube/data \
+            -v sonarqube_extensions:/opt/sonarqube/extensions \
+            -v sonarqube_logs:/opt/sonarqube/logs \
+            "{{ sonarqube_image }}"
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Wait for SonarQube port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ sonarqube_port }}"
+        timeout: 600
+        delay: 20
+
+    - name: Wait for SonarQube system UP
+      ansible.builtin.shell: |
+        set -e
+
+        for i in $(seq 1 60); do
+          STATUS=$(curl -s "http://127.0.0.1:{{ sonarqube_port }}/api/system/status" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
+
+          echo "SonarQube status: $STATUS"
+
+          if [ "$STATUS" = "UP" ]; then
+            exit 0
+          fi
+
+          sleep 10
+        done
+
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Try changing SonarQube admin password
+      ansible.builtin.shell: |
+        set +e
+
+        curl -s -u "{{ sonar_admin_user }}:{{ sonar_default_password }}" \
+          -X POST \
+          --data-urlencode "login={{ sonar_admin_user }}" \
+          --data-urlencode "previousPassword={{ sonar_default_password }}" \
+          --data-urlencode "password={{ sonar_admin_password }}" \
+          "http://127.0.0.1:{{ sonarqube_port }}/api/users/change_password" >/dev/null
+
+        exit 0
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Create SonarQube token
+      ansible.builtin.shell: |
+        set -e
+
+        PASS="{{ sonar_admin_password }}"
+
+        if ! curl -fsS -u "{{ sonar_admin_user }}:${PASS}" \
+          "http://127.0.0.1:{{ sonarqube_port }}/api/authentication/validate" >/dev/null; then
+          PASS="{{ sonar_default_password }}"
+        fi
+
+        curl -s -u "{{ sonar_admin_user }}:${PASS}" \
+          -X POST \
+          --data-urlencode "name={{ sonar_token_name }}" \
+          "http://127.0.0.1:{{ sonarqube_port }}/api/user_tokens/revoke" >/dev/null || true
+
+        curl -s -u "{{ sonar_admin_user }}:${PASS}" \
+          -X POST \
+          --data-urlencode "name={{ sonar_token_name }}" \
+          "http://127.0.0.1:{{ sonarqube_port }}/api/user_tokens/generate" \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])'
+      args:
+        executable: /bin/bash
+      register: sonar_token_result
+      changed_when: true
+      no_log: true
+
+    - name: Create SonarQube project
+      ansible.builtin.shell: |
+        set +e
+
+        PASS="{{ sonar_admin_password }}"
+
+        curl -s -u "{{ sonar_admin_user }}:${PASS}" \
+          -X POST \
+          --data-urlencode "project={{ sonar_project_key }}" \
+          --data-urlencode "name={{ sonar_project_name }}" \
+          "http://127.0.0.1:{{ sonarqube_port }}/api/projects/create" >/dev/null
+
+        exit 0
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Create SonarQube webhook for Jenkins quality gate
+      ansible.builtin.shell: |
+        set +e
+
+        PASS="{{ sonar_admin_password }}"
+
+        curl -s -u "{{ sonar_admin_user }}:${PASS}" \
+          -X POST \
+          --data-urlencode "name=jenkins" \
+          --data-urlencode "url=http://host.docker.internal:8080/sonarqube-webhook/" \
+          "http://127.0.0.1:{{ sonarqube_port }}/api/webhooks/create" >/dev/null
+
+        exit 0
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Install Jenkins SonarQube plugin if needed
+      ansible.builtin.shell: |
+        set -e
+
+        if docker exec "{{ jenkins_container_name }}" sh -c '
+          test -f /var/jenkins_home/plugins/sonar.jpi           || test -f /var/jenkins_home/plugins/sonar.hpi           || test -d /var/jenkins_home/plugins/sonar
+        '; then
+          echo "SonarQube plugin already installed. Skipping plugin install."
+          exit 0
+        fi
+
+        docker exec -u root "{{ jenkins_container_name }}" bash -lc '
+          export PATH=/opt/java/openjdk/bin:/usr/local/openjdk-21/bin:/usr/local/openjdk-17/bin:/usr/bin:$PATH
+          java -version
+          jenkins-plugin-cli --plugins sonar plain-credentials credentials credentials-binding
+          chown -R 1000:1000 /var/jenkins_home/plugins
+        '
+
+        docker restart "{{ jenkins_container_name }}"
+      args:
+        executable: /bin/bash
+
+    - name: Wait for Jenkins after plugin install
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8080
+        timeout: 300
+        delay: 30
+
+    - name: Create Jenkins credential and SonarQube server config script
+      ansible.builtin.copy:
+        dest: /tmp/configure-sonarqube-jenkins.groovy
+        mode: "0600"
+        content: |
+          import jenkins.model.Jenkins
+          import com.cloudbees.plugins.credentials.CredentialsScope
+          import com.cloudbees.plugins.credentials.SystemCredentialsProvider
+          import com.cloudbees.plugins.credentials.domains.Domain
+          import com.cloudbees.plugins.credentials.common.StandardCredentials
+          import com.cloudbees.plugins.credentials.CredentialsProvider
+          import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
+          import hudson.util.Secret
+
+          def jenkins = Jenkins.getInstanceOrNull()
+          def store = SystemCredentialsProvider.getInstance().getStore()
+
+          def credId = "{{ sonar_jenkins_credential_id }}"
+          def token = "{{ sonar_token_result.stdout }}"
+
+          def existing = CredentialsProvider.lookupCredentials(
+            StandardCredentials.class,
+            jenkins,
+            null,
+            null
+          ).find { it.id == credId }
+
+          def newCred = new StringCredentialsImpl(
+            CredentialsScope.GLOBAL,
+            credId,
+            "SonarQube token managed by Ansible",
+            Secret.fromString(token)
+          )
+
+          if (existing == null) {
+            store.addCredentials(Domain.global(), newCred)
+            println("Created Jenkins credential: " + credId)
+          } else {
+            store.updateCredentials(Domain.global(), existing, newCred)
+            println("Updated Jenkins credential: " + credId)
+          }
+
+          jenkins.save()
+      no_log: true
+
+    - name: Copy Groovy script into Jenkins container
+      ansible.builtin.shell: |
+        set -e
+
+        docker cp /tmp/configure-sonarqube-jenkins.groovy \
+          "{{ jenkins_container_name }}":/var/jenkins_home/init.groovy.d/configure-sonarqube-jenkins.groovy
+
+        docker exec -u root "{{ jenkins_container_name }}" sh -c '
+          chown 1000:1000 /var/jenkins_home/init.groovy.d/configure-sonarqube-jenkins.groovy
+        '
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Write Jenkins SonarQube global configuration XML
+      ansible.builtin.copy:
+        dest: /tmp/hudson.plugins.sonar.SonarGlobalConfiguration.xml
+        mode: "0644"
+        content: |
+          <?xml version='1.1' encoding='UTF-8'?>
+          <hudson.plugins.sonar.SonarGlobalConfiguration>
+            <buildWrapperEnabled>false</buildWrapperEnabled>
+            <installations>
+              <hudson.plugins.sonar.SonarInstallation>
+                <name>{{ sonar_server_name }}</name>
+                <serverUrl>{{ sonar_url }}</serverUrl>
+                <credentialsId>{{ sonar_jenkins_credential_id }}</credentialsId>
+                <webhookSecretId></webhookSecretId>
+                <mojoVersion></mojoVersion>
+                <additionalProperties></additionalProperties>
+                <additionalAnalysisProperties></additionalAnalysisProperties>
+                <triggers>
+                  <skipScmCause>false</skipScmCause>
+                  <skipUpstreamCause>false</skipUpstreamCause>
+                </triggers>
+              </hudson.plugins.sonar.SonarInstallation>
+            </installations>
+          </hudson.plugins.sonar.SonarGlobalConfiguration>
+
+    - name: Copy SonarQube global config into Jenkins home
+      ansible.builtin.shell: |
+        set -e
+
+        docker cp /tmp/hudson.plugins.sonar.SonarGlobalConfiguration.xml \
+          "{{ jenkins_container_name }}":/var/jenkins_home/hudson.plugins.sonar.SonarGlobalConfiguration.xml
+
+        docker exec -u root "{{ jenkins_container_name }}" sh -c '
+          chown 1000:1000 /var/jenkins_home/hudson.plugins.sonar.SonarGlobalConfiguration.xml
+        '
+      args:
+        executable: /bin/bash
+
+    - name: Restart Jenkins to apply SonarQube config
+      ansible.builtin.command: docker restart "{{ jenkins_container_name }}"
+
+    - name: Wait for Jenkins
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8080
+        timeout: 300
+        delay: 30
+
+    - name: Remove temporary Jenkins init script
+      ansible.builtin.shell: |
+        docker exec -u root "{{ jenkins_container_name }}" sh -c '
+          rm -f /var/jenkins_home/init.groovy.d/configure-sonarqube-jenkins.groovy
+        '
+        rm -f /tmp/configure-sonarqube-jenkins.groovy
+      args:
+        executable: /bin/bash
+
+    - name: Show SonarQube final info
+      ansible.builtin.debug:
+        msg:
+          - "SonarQube local host URL on controller: http://127.0.0.1:{{ sonarqube_port }}"
+          - "SonarQube URL used by Jenkins agents: {{ sonar_url }}"
+          - "Jenkins SonarQube server name: {{ sonar_server_name }}"
+          - "Jenkins credential ID: {{ sonar_jenkins_credential_id }}"
+          - "Project key: {{ sonar_project_key }}"

@@ -1,0 +1,42 @@
+---
+- name: Configure default EBS StorageClass for DigiPipeline
+  hosts: bastion
+  gather_facts: false
+
+  vars:
+    kubeconfig: "$HOME/.kube/config"
+
+  tasks:
+    - name: Remove default annotation from old gp2 StorageClass if exists
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "{{ kubeconfig }}" annotate storageclass gp2 \
+          storageclass.kubernetes.io/is-default-class=false \
+          --overwrite || true
+      changed_when: false
+
+    - name: Create gp3 EBS CSI StorageClass as default
+      ansible.builtin.shell: |
+        cat > /tmp/gp3-storageclass.yml <<'EOF'
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: gp3
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "true"
+        provisioner: ebs.csi.aws.com
+        parameters:
+          type: gp3
+          fsType: ext4
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        volumeBindingMode: WaitForFirstConsumer
+        EOF
+
+        kubectl --kubeconfig "{{ kubeconfig }}" apply -f /tmp/gp3-storageclass.yml
+      register: storageclass_apply
+      changed_when: "'created' in storageclass_apply.stdout or 'configured' in storageclass_apply.stdout"
+
+    - name: Show StorageClasses
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "{{ kubeconfig }}" get storageclass
+      changed_when: false

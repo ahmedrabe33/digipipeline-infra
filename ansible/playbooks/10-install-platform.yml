@@ -1,7 +1,14 @@
 ---
 - import_playbook: 00-verify-cluster.yml
+
+- import_playbook: 04-configure-default-storageclass.yml
+
 - import_playbook: 01-install-argocd.yml
+
 - import_playbook: 03-install-aws-load-balancer-controller.yml
+
 - import_playbook: 06-install-karpenter.yml
+
 - import_playbook: 09-install-monitoring.yml
+
 - import_playbook: 00-verify-cluster.yml

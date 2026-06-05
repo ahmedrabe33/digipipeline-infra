@@ -1,0 +1,158 @@
+---
+- name: Configure Prometheus and Grafana on EKS
+  hosts: bastion
+  become: false
+  gather_facts: false
+
+  vars:
+    aws_region: "us-east-1"
+    cluster_name: "devops-ha-eks"
+
+    monitoring_namespace: "monitoring"
+    monitoring_release: "kube-prometheus-stack"
+    grafana_admin_password: "admin123"
+
+  tasks:
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.shell: |
+        set -e
+        aws eks update-kubeconfig \
+          --region "{{ aws_region }}" \
+          --name "{{ cluster_name }}" \
+          --kubeconfig "$HOME/.kube/config"
+      args:
+        executable: /bin/bash
+
+    - name: Ensure Helm is installed
+      ansible.builtin.shell: |
+        set -e
+
+        if command -v helm >/dev/null 2>&1; then
+          helm version
+          exit 0
+        fi
+
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        executable: /bin/bash
+
+    - name: Add Prometheus Helm repo
+      ansible.builtin.shell: |
+        set -e
+
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+        helm repo update
+      args:
+        executable: /bin/bash
+
+    - name: Create monitoring namespace
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" create namespace "{{ monitoring_namespace }}" \
+          --dry-run=client -o yaml \
+        | kubectl --kubeconfig "$HOME/.kube/config" apply -f -
+      args:
+        executable: /bin/bash
+
+    - name: Create kube-prometheus-stack values file
+      ansible.builtin.copy:
+        dest: /tmp/kube-prometheus-stack-values.yml
+        mode: "0644"
+        content: |
+          grafana:
+            enabled: true
+            adminUser: admin
+            adminPassword: "{{ grafana_admin_password }}"
+            service:
+              type: ClusterIP
+            defaultDashboardsEnabled: true
+
+          prometheus:
+            enabled: true
+            service:
+              type: ClusterIP
+            prometheusSpec:
+              retention: 7d
+              scrapeInterval: 30s
+              evaluationInterval: 30s
+              serviceMonitorSelectorNilUsesHelmValues: false
+              podMonitorSelectorNilUsesHelmValues: false
+              ruleSelectorNilUsesHelmValues: false
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 512Mi
+                limits:
+                  cpu: 1000m
+                  memory: 2Gi
+
+          alertmanager:
+            enabled: true
+            service:
+              type: ClusterIP
+            alertmanagerSpec:
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 300m
+                  memory: 512Mi
+
+          kubeStateMetrics:
+            enabled: true
+
+          nodeExporter:
+            enabled: true
+
+          prometheusOperator:
+            enabled: true
+
+    - name: Install or upgrade kube-prometheus-stack
+      ansible.builtin.shell: |
+        set -e
+
+        helm upgrade --install "{{ monitoring_release }}" prometheus-community/kube-prometheus-stack \
+          --namespace "{{ monitoring_namespace }}" \
+          --values /tmp/kube-prometheus-stack-values.yml \
+          --wait \
+          --timeout 15m
+      args:
+        executable: /bin/bash
+
+    - name: Wait for monitoring pods to be ready
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ monitoring_namespace }}" \
+          wait --for=condition=Ready pod --all --timeout=600s
+      args:
+        executable: /bin/bash
+
+    - name: Show monitoring pods
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ monitoring_namespace }}" get pods -o wide
+      register: monitoring_pods
+      changed_when: false
+
+    - name: Show monitoring services
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          -n "{{ monitoring_namespace }}" get svc
+      register: monitoring_services
+      changed_when: false
+
+    - name: Print monitoring info
+      ansible.builtin.debug:
+        msg:
+          - "Prometheus/Grafana configured successfully."
+          - "Namespace: {{ monitoring_namespace }}"
+          - "Grafana username: admin"
+          - "Grafana password: {{ grafana_admin_password }}"
+          - "Pods:"
+          - "{{ monitoring_pods.stdout_lines }}"
+          - "Services:"
+          - "{{ monitoring_services.stdout_lines }}"
