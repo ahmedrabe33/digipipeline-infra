@@ -1,0 +1,245 @@
+---
+- name: Prepare AWS EBS CSI Driver Pod Identity
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_profile: "default"
+    aws_region: "us-east-1"
+    cluster_name: "devops-ha-eks"
+    ebs_namespace: "kube-system"
+    service_account_name: "ebs-csi-controller-sa"
+    role_name: "devops-ha-eks-ebs-csi-pod-identity-role"
+    trust_policy_path: "/tmp/ebs-csi-pod-identity-trust.json"
+
+  tasks:
+    - name: Get AWS account ID
+      ansible.builtin.shell: |
+        set -e
+
+        aws sts get-caller-identity \
+          --profile "{{ aws_profile }}" \
+          --query Account \
+          --output text
+      args:
+        executable: /bin/bash
+      register: aws_account_id
+      changed_when: false
+
+    - name: Set EBS CSI role ARN
+      ansible.builtin.set_fact:
+        ebs_csi_role_arn: "arn:aws:iam::{{ aws_account_id.stdout }}:role/{{ role_name }}"
+
+    - name: Create Pod Identity trust policy file
+      ansible.builtin.copy:
+        dest: "{{ trust_policy_path }}"
+        mode: "0644"
+        content: |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "pods.eks.amazonaws.com"
+                },
+                "Action": [
+                  "sts:AssumeRole",
+                  "sts:TagSession"
+                ]
+              }
+            ]
+          }
+
+    - name: Check if EBS CSI Pod Identity IAM role exists
+      ansible.builtin.shell: |
+        set -e
+
+        aws iam get-role \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ role_name }}" \
+          --query "Role.Arn" \
+          --output text 2>/dev/null || echo "MISSING"
+      args:
+        executable: /bin/bash
+      register: ebs_csi_role_check
+      changed_when: false
+
+    - name: Create EBS CSI Pod Identity IAM role if missing
+      ansible.builtin.shell: |
+        set -e
+
+        aws iam create-role \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ role_name }}" \
+          --assume-role-policy-document file://{{ trust_policy_path }}
+      args:
+        executable: /bin/bash
+      when: ebs_csi_role_check.stdout == "MISSING"
+
+    - name: Attach AmazonEBSCSIDriverPolicy to IAM role
+      ansible.builtin.shell: |
+        set -e
+
+        aws iam attach-role-policy \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ role_name }}" \
+          --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Wait for IAM role propagation
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Check existing Pod Identity association
+      ansible.builtin.shell: |
+        set -e
+
+        aws eks list-pod-identity-associations \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --namespace "{{ ebs_namespace }}" \
+          --service-account "{{ service_account_name }}" \
+          --query "associations[0].associationId" \
+          --output text 2>/dev/null || echo "MISSING"
+      args:
+        executable: /bin/bash
+      register: pod_identity_association
+      changed_when: false
+
+    - name: Create Pod Identity association if missing
+      ansible.builtin.shell: |
+        set -e
+
+        aws eks create-pod-identity-association \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --namespace "{{ ebs_namespace }}" \
+          --service-account "{{ service_account_name }}" \
+          --role-arn "{{ ebs_csi_role_arn }}"
+      args:
+        executable: /bin/bash
+      when: >
+        pod_identity_association.stdout == "None" or
+        pod_identity_association.stdout == "MISSING" or
+        pod_identity_association.stdout == ""
+
+    - name: Show EBS CSI Pod Identity role
+      ansible.builtin.debug:
+        msg:
+          - "EBS CSI Pod Identity role: {{ ebs_csi_role_arn }}"
+          - "Service account: {{ ebs_namespace }}/{{ service_account_name }}"
+
+
+- name: Install AWS EBS CSI Driver using Helm
+  hosts: bastion
+  gather_facts: false
+
+  vars:
+    kubeconfig: "$HOME/.kube/config"
+    ebs_namespace: "kube-system"
+    service_account_name: "ebs-csi-controller-sa"
+
+  tasks:
+    - name: Add or update AWS EBS CSI Driver Helm repo
+      ansible.builtin.shell: |
+        set -e
+
+        helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver --force-update
+        helm repo update
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Install or upgrade AWS EBS CSI Driver
+      ansible.builtin.shell: |
+        set -e
+
+        helm --kubeconfig "{{ kubeconfig }}" upgrade --install aws-ebs-csi-driver \
+          aws-ebs-csi-driver/aws-ebs-csi-driver \
+          --namespace "{{ ebs_namespace }}" \
+          --set controller.serviceAccount.create=true \
+          --set controller.serviceAccount.name="{{ service_account_name }}" \
+          --set node.serviceAccount.create=true \
+          --wait \
+          --timeout 10m
+      args:
+        executable: /bin/bash
+      register: ebs_csi_install
+      changed_when: >
+        'deployed' in ebs_csi_install.stdout or
+        'upgraded' in ebs_csi_install.stdout or
+        'has been upgraded' in ebs_csi_install.stdout or
+        'has been installed' in ebs_csi_install.stdout
+
+    - name: Restart EBS CSI controller deployment
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ ebs_namespace }}" \
+          rollout restart deployment/ebs-csi-controller
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for EBS CSI controller
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ ebs_namespace }}" \
+          rollout status deployment/ebs-csi-controller \
+          --timeout=10m
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Wait for EBS CSI node daemonset
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ ebs_namespace }}" \
+          rollout status daemonset/ebs-csi-node \
+          --timeout=10m
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show EBS CSI pods
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ ebs_namespace }}" \
+          get pods | grep ebs || true
+      args:
+        executable: /bin/bash
+      register: ebs_pods
+      changed_when: false
+
+    - name: Print EBS CSI pods
+      ansible.builtin.debug:
+        var: ebs_pods.stdout_lines
+
+    - name: Show EBS CSI service account
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ ebs_namespace }}" \
+          get sa "{{ service_account_name }}" -o wide
+      args:
+        executable: /bin/bash
+      register: ebs_sa
+      changed_when: false
+
+    - name: Print EBS CSI service account
+      ansible.builtin.debug:
+        var: ebs_sa.stdout_lines

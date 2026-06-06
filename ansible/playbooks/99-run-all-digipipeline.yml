@@ -2,17 +2,30 @@
 # Master playbook for DigiPipeline
 # Run from local machine only:
 # ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml
-
-# Optional full infrastructure rebuild:
+#
+# Full infrastructure rebuild:
 # ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags infra
+#
+# Run only platform:
+# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags platform
+#
+# Run only CI/Jenkins:
+# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags ci
+#
+# Run only DevSecOps:
+# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags devsecops
+#
+# Open dashboards only:
+# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags access
 
 - import_playbook: 00-ensure-keypairs.yml
   tags:
     - keys
+    - infra
     - all
 
 # Disabled by default for safety.
-# Run only with: --tags infra
+# Runs only when using: --tags infra
 - import_playbook: 00-rebuild-infra.yml
   tags:
     - never
@@ -22,108 +35,121 @@
   tags:
     - verify
     - cluster
+    - platform
     - all
 
-- import_playbook: 01-install-argocd.yml
+# Main Kubernetes platform wrapper.
+# Expected to include:
+# 00-verify-cluster.yml
+# 04-install-ebs-csi-driver.yml
+# 04-configure-default-storageclass.yml
+# 01-install-argocd.yml
+# 03-install-aws-load-balancer-controller.yml
+# 06-install-karpenter.yml
+# 09-install-monitoring.yml
+# 00-verify-cluster.yml
+- import_playbook: 10-install-platform.yml
   tags:
+    - platform
+    - cluster
+    - ebs
+    - storage
     - argocd
-    - gitops
+    - alb
+    - karpenter
+    - monitoring
     - all
 
 - import_playbook: 02-argocd-password.yml
   tags:
     - argocd
     - access
+    - info
     - all
 
-- import_playbook: 03-install-aws-load-balancer-controller.yml
+# Must run before bootstrapping GitOps workloads.
+# It creates DB_NAME, DB_USER, DB_PASSWORD, RabbitMQ, Redis, JWT, and connection URL secrets.
+- import_playbook: 13-create-app-secrets.yml
   tags:
-    - alb
-    - platform
-    - all
-
-- import_playbook: 06-install-karpenter.yml
-  tags:
-    - karpenter
-    - platform
-    - all
-
-- import_playbook: 09-install-monitoring.yml
-  tags:
-    - monitoring
-    - all
-
-- import_playbook: 10-install-platform.yml
-  tags:
+    - secrets
+    - app
+    - gitops
     - platform
     - all
 
 - import_playbook: 11-bootstrap-gitops-app.yml
   tags:
     - gitops
+    - app
     - argocd
     - all
 
-- import_playbook: 20-install-jenkins-controller.yml
-  tags:
-    - jenkins
-    - ci
-    - all
-
-- import_playbook: 21-prepare-jenkins-agents.yml
-  tags:
-    - jenkins
-    - agents
-    - ci
-    - all
-
-- import_playbook: 24-install-sonarqube.yml
-  tags:
-    - sonarqube
-    - devsecops
-    - all
-
-- import_playbook: 25-install-trivy.yml
-  tags:
-    - trivy
-    - devsecops
-    - all
-
-- import_playbook: 27-setup-sonarqube-for-jenkins.yml
-  tags:
-    - sonarqube
-    - jenkins
-    - devsecops
-    - all
-
-- import_playbook: 28-configure-prometheus.yml
-  tags:
-    - prometheus
-    - monitoring
-    - all
-
+# Main CI wrapper.
+# Expected to include:
+# 20-install-jenkins-controller.yml
+# 21-prepare-jenkins-agents.yml
+# 22-show-ci-info.yml
 - import_playbook: 30-install-ci.yml
   tags:
     - ci
     - jenkins
     - all
 
-- import_playbook: 31-install-devsecops.yml
+- import_playbook: 29-install-jenkins-github-plugins.yml
   tags:
-    - devsecops
+    - ci
+    - jenkins
+    - plugins
+    - github
     - all
 
 - import_playbook: 32-configure-jenkins-ecr-iam.yml
   tags:
+    - ci
+    - jenkins
     - ecr
     - iam
-    - jenkins
     - all
 
 - import_playbook: 32-configure-jenkins-agents.yml
   tags:
+    - ci
     - jenkins
     - agents
+    - all
+
+# Main DevSecOps wrapper.
+# Expected to include:
+# 24-install-sonarqube.yml
+# 25-install-trivy.yml
+# 27-verify-devsecops.yml
+# 26-open-sonarqube-access.yml
+- import_playbook: 31-install-devsecops.yml
+  tags:
+    - devsecops
+    - sonarqube
+    - trivy
+    - all
+
+- import_playbook: 28-install-jenkins-sonarqube-plugin.yml
+  tags:
+    - devsecops
+    - sonarqube
+    - jenkins
+    - plugins
+    - all
+
+- import_playbook: 27-setup-sonarqube-for-jenkins.yml
+  tags:
+    - devsecops
+    - sonarqube
+    - jenkins
+    - all
+
+- import_playbook: 28-configure-prometheus.yml
+  tags:
+    - prometheus
+    - monitoring
     - all
 
 - import_playbook: 12-show-access-info.yml
@@ -136,9 +162,12 @@
   tags:
     - info
     - ci
+    - jenkins
     - all
 
+# Do not run by default, because local ports may already be busy.
+# Run only with: --tags access
 - import_playbook: open-all-access.yml
   tags:
+    - never
     - access
-    - all

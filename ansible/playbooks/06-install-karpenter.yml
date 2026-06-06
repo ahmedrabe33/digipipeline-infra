@@ -148,22 +148,37 @@
                   operator: In
                   values:
                     - amd64
+
                 - key: kubernetes.io/os
                   operator: In
                   values:
                     - linux
+
                 - key: karpenter.sh/capacity-type
                   operator: In
                   values:
                     - on-demand
-                - key: node.kubernetes.io/instance-type
+
+                - key: karpenter.k8s.aws/instance-category
                   operator: In
                   values:
-                    - t3.medium
-                    - t3.large
+                    - t
+                    - m
+                    - c
+
+                - key: karpenter.k8s.aws/instance-generation
+                  operator: Gt
+                  values:
+                    - "2"
+
+                # Keep only 2 vCPU instances because this AWS account currently has a low On-Demand vCPU quota.
+                - key: karpenter.k8s.aws/instance-cpu
+                  operator: In
+                  values:
+                    - "2"
           limits:
-            cpu: "4"
-            memory: 8Gi
+            cpu: "8"
+            memory: "32Gi"
           disruption:
             consolidationPolicy: WhenEmptyOrUnderutilized
             consolidateAfter: 60s
@@ -210,10 +225,45 @@
       ansible.builtin.debug:
         var: karpenter_objects.stdout_lines
 
+    - name: Show Karpenter NodePool limits
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          get nodepool "{{ karpenter_nodepool_name }}" \
+          -o jsonpath='{.spec.limits}{"\n"}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: karpenter_limits
+
+    - name: Print Karpenter NodePool limits
+      ansible.builtin.debug:
+        var: karpenter_limits.stdout_lines
+
+    - name: Show Karpenter NodePool requirements
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "$HOME/.kube/config" \
+          get nodepool "{{ karpenter_nodepool_name }}" \
+          -o jsonpath='{.spec.template.spec.requirements}{"\n"}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: karpenter_requirements
+
+    - name: Print Karpenter NodePool requirements
+      ansible.builtin.debug:
+        var: karpenter_requirements.stdout_lines
+
     - name: Show next command
       ansible.builtin.debug:
         msg:
           - "Karpenter is installed."
           - "NodePool: {{ karpenter_nodepool_name }}"
           - "EC2NodeClass: {{ karpenter_ec2nodeclass_name }}"
-          - "Next: deploy a workload that needs extra capacity to test node provisioning."
+          - "NodePool limits: cpu=8, memory=32Gi"
+          - "Allowed instance categories: t, m, c"
+          - "Allowed instance CPU size: 2"
+          - "This configuration is optimized for the current low AWS vCPU quota."
