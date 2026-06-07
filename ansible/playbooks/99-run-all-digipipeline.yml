@@ -1,29 +1,37 @@
 ---
 # Master playbook for DigiPipeline
 # Run from local machine only:
-# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml
+# cd ~/digipipeline-workspace/digipipeline-infra/ansible
+#
+# Normal run without rebuilding Terraform:
+# ansible-playbook playbooks/99-run-all-digipipeline.yml
 #
 # Full infrastructure rebuild:
-# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags infra
+# ansible-playbook playbooks/99-run-all-digipipeline.yml --tags infra
 #
 # Run only platform:
-# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags platform
+# ansible-playbook playbooks/99-run-all-digipipeline.yml --tags platform
+#
+# Run only app/GitOps:
+# ansible-playbook playbooks/99-run-all-digipipeline.yml --tags app
 #
 # Run only CI/Jenkins:
-# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags ci
+# ansible-playbook playbooks/99-run-all-digipipeline.yml --tags ci
 #
 # Run only DevSecOps:
-# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags devsecops
+# ansible-playbook playbooks/99-run-all-digipipeline.yml --tags devsecops
 #
 # Open dashboards only:
-# ansible-playbook -i inventories/dev/hosts.ini playbooks/99-run-all-digipipeline.yml --tags access
+# ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
 
+# 1. Keys
 - import_playbook: 00-ensure-keypairs.yml
   tags:
     - keys
     - infra
     - all
 
+# 2. Infrastructure rebuild
 # Disabled by default for safety.
 # Runs only when using: --tags infra
 - import_playbook: 00-rebuild-infra.yml
@@ -31,6 +39,7 @@
     - never
     - infra
 
+# 3. Verify cluster access
 - import_playbook: 00-verify-cluster.yml
   tags:
     - verify
@@ -38,7 +47,7 @@
     - platform
     - all
 
-# Main Kubernetes platform wrapper.
+# 4. Kubernetes platform
 # Expected to include:
 # 00-verify-cluster.yml
 # 04-install-ebs-csi-driver.yml
@@ -60,6 +69,7 @@
     - monitoring
     - all
 
+# 5. Argo CD password/info
 - import_playbook: 02-argocd-password.yml
   tags:
     - argocd
@@ -67,8 +77,9 @@
     - info
     - all
 
-# Must run before bootstrapping GitOps workloads.
-# It creates DB_NAME, DB_USER, DB_PASSWORD, RabbitMQ, Redis, JWT, and connection URL secrets.
+# 6. App secrets
+# Must run before GitOps workloads.
+# Creates DB_NAME, DB_USER, DB_PASSWORD, RabbitMQ, Redis, JWT, and URLs.
 - import_playbook: 13-create-app-secrets.yml
   tags:
     - secrets
@@ -77,6 +88,8 @@
     - platform
     - all
 
+# 7. Bootstrap GitOps app
+# This creates the Argo CD Application and deploys the workloads.
 - import_playbook: 11-bootstrap-gitops-app.yml
   tags:
     - gitops
@@ -84,7 +97,18 @@
     - argocd
     - all
 
-# Main CI wrapper.
+# 8. Apply database schema fixes
+# Must run after GitOps app because postgres-0 must exist first.
+- import_playbook: 14-apply-db-schema.yml
+  tags:
+    - db
+    - schema
+    - app
+    - gitops
+    - platform
+    - all
+
+# 9. CI / Jenkins
 # Expected to include:
 # 20-install-jenkins-controller.yml
 # 21-prepare-jenkins-agents.yml
@@ -95,6 +119,7 @@
     - jenkins
     - all
 
+# 10. Jenkins GitHub plugins
 - import_playbook: 29-install-jenkins-github-plugins.yml
   tags:
     - ci
@@ -103,6 +128,7 @@
     - github
     - all
 
+# 11. Jenkins ECR IAM
 - import_playbook: 32-configure-jenkins-ecr-iam.yml
   tags:
     - ci
@@ -111,6 +137,7 @@
     - iam
     - all
 
+# 12. Jenkins agents
 - import_playbook: 32-configure-jenkins-agents.yml
   tags:
     - ci
@@ -118,7 +145,7 @@
     - agents
     - all
 
-# Main DevSecOps wrapper.
+# 13. DevSecOps
 # Expected to include:
 # 24-install-sonarqube.yml
 # 25-install-trivy.yml
@@ -131,6 +158,7 @@
     - trivy
     - all
 
+# 14. Jenkins SonarQube plugin
 - import_playbook: 28-install-jenkins-sonarqube-plugin.yml
   tags:
     - devsecops
@@ -139,6 +167,7 @@
     - plugins
     - all
 
+# 15. Configure Jenkins with SonarQube
 - import_playbook: 27-setup-sonarqube-for-jenkins.yml
   tags:
     - devsecops
@@ -146,18 +175,21 @@
     - jenkins
     - all
 
+# 16. Monitoring extra configuration
 - import_playbook: 28-configure-prometheus.yml
   tags:
     - prometheus
     - monitoring
     - all
 
+# 17. Show application/platform access info
 - import_playbook: 12-show-access-info.yml
   tags:
     - info
     - access
     - all
 
+# 18. Show Jenkins/ECR info
 - import_playbook: 22-show-ci-info.yml
   tags:
     - info
@@ -165,7 +197,8 @@
     - jenkins
     - all
 
-# Do not run by default, because local ports may already be busy.
+# 19. Open dashboards
+# Do not run by default because local ports may already be busy.
 # Run only with: --tags access
 - import_playbook: open-all-access.yml
   tags:

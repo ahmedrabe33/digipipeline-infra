@@ -1,0 +1,68 @@
+---
+- name: Apply DigiPipeline database schema fixes
+  hosts: bastion
+  gather_facts: false
+
+  vars:
+    kubeconfig: "$HOME/.kube/config"
+    app_namespace: "auraweb-dev"
+    postgres_pod: "postgres-0"
+
+  tasks:
+    - name: Wait for Postgres pod to be ready
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ app_namespace }}" \
+          wait --for=condition=Ready pod/{{ postgres_pod }} \
+          --timeout=300s
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Rename users.password to users.password_hash if needed
+      ansible.builtin.shell: |
+        set -e
+
+        cat <<'SQL' | kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ app_namespace }}" \
+          exec -i "{{ postgres_pod }}" -- sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'users'
+              AND column_name = 'password'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'users'
+              AND column_name = 'password_hash'
+          ) THEN
+            ALTER TABLE public.users RENAME COLUMN password TO password_hash;
+          END IF;
+        END $$;
+        SQL
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show users table schema
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ app_namespace }}" \
+          exec "{{ postgres_pod }}" -- sh -lc \
+          'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d users"'
+      args:
+        executable: /bin/bash
+      register: users_schema
+      changed_when: false
+
+    - name: Print users table schema
+      ansible.builtin.debug:
+        var: users_schema.stdout_lines
