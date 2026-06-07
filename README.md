@@ -12,16 +12,16 @@ DigiPipeline is a multi-repository DevOps platform designed to simulate a real-w
 
 The project is split into three repositories:
 
-| Repository                                                                  | Purpose                                                                        |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| [`digipipeline-infra`](https://github.com/ahmedrabe33/digipipeline-infra)   | Infrastructure automation using Terraform and Ansible                          |
-| [`digipipeline-gitops`](https://github.com/ahmedrabe33/digipipeline-gitops) | Kubernetes manifests, Kustomize overlays, and Argo CD deployment configuration |
-| [`digipipeline-app`](https://github.com/ahmedrabe33/digipipeline-app)       | Application source code, Dockerfiles, and CI build context                     |
+| Repository            | Purpose                                                                        |
+| --------------------- | ------------------------------------------------------------------------------ |
+| `digipipeline-infra`  | Infrastructure automation using Terraform and Ansible                          |
+| `digipipeline-gitops` | Kubernetes manifests, Kustomize overlays, and Argo CD deployment configuration |
+| `digipipeline-app`    | Application source code, Dockerfiles, and CI build context                     |
 
 This separation follows a real production pattern:
 
 ```text
-Application code        -> digipipeline-app
+Application code         -> digipipeline-app
 Kubernetes desired state -> digipipeline-gitops
 Infrastructure platform  -> digipipeline-infra
 ```
@@ -32,6 +32,9 @@ The goal of the project is to automate the full DevOps platform lifecycle:
 Build Infrastructure
   -> Configure Secure Access
   -> Install Kubernetes Platform Tools
+  -> Create Application Secrets
+  -> Bootstrap GitOps Application
+  -> Apply Database Schema Fixes
   -> Install CI Infrastructure
   -> Configure DevSecOps Tools
   -> Build and Push Container Images
@@ -192,6 +195,8 @@ Local SSH tunnels
 Access automation
 ```
 
+All project operations are intended to be triggered from the local control machine using Ansible, not by manually SSHing into the Bastion host.
+
 ---
 
 ## CI/CD and GitOps Flow
@@ -315,12 +320,15 @@ Group variables updates
 Bastion configuration
 EKS kubeconfig setup
 Cluster verification
+EBS CSI Driver installation
+Default StorageClass configuration
 Argo CD installation
 AWS Load Balancer Controller installation
 Karpenter installation
 Prometheus and Grafana installation
-Default StorageClass configuration
+Application secrets creation
 GitOps application bootstrap
+Database schema fixes
 Jenkins controller installation
 Jenkins agent preparation
 Jenkins GitHub plugin setup
@@ -392,7 +400,7 @@ Bootstrap Argo CD applications
 Troubleshoot platform components
 ```
 
-All project operations are intended to be triggered from the local control machine using Ansible, not by manually SSHing into the Bastion host.
+All project operations are triggered from the local control machine using Ansible.
 
 ---
 
@@ -440,11 +448,92 @@ Application deployment configuration
 
 ---
 
+### Application Secrets
+
+Application secrets are created using Ansible before GitOps workloads are deployed.
+
+The secrets playbook is:
+
+```bash
+ansible-playbook playbooks/13-create-app-secrets.yml
+```
+
+It creates and updates the Kubernetes secret:
+
+```text
+auraweb-dev/app-secrets
+```
+
+The secret includes keys such as:
+
+```text
+DB_NAME
+DB_USER
+DB_PASSWORD
+DB_HOST
+DB_PORT
+POSTGRES_DB
+POSTGRES_USER
+POSTGRES_PASSWORD
+DATABASE_URL
+JWT_SECRET
+REDIS_HOST
+REDIS_PORT
+REDIS_URL
+RABBITMQ_HOST
+RABBITMQ_PORT
+RABBITMQ_USER
+RABBITMQ_PASS
+RABBITMQ_URL
+AMQP_URL
+```
+
+This prevents workloads from failing with missing secret keys after a fresh rebuild.
+
+---
+
+### Database Schema Fixes
+
+PostgreSQL runs as a StatefulSet and uses a PersistentVolumeClaim.
+
+Some schema adjustments are automated after the GitOps application is deployed because the `postgres-0` pod must exist first.
+
+The database schema playbook is:
+
+```bash
+ansible-playbook playbooks/14-apply-db-schema.yml
+```
+
+It is used to make the development database compatible with the current application code.
+
+Example schema fixes include:
+
+```text
+Ensuring password_hash exists
+Dropping NOT NULL from legacy password column if needed
+Verifying users table structure
+```
+
+This playbook should run after:
+
+```text
+11-bootstrap-gitops-app.yml
+```
+
+---
+
 ### Persistent Storage
 
 DigiPipeline supports persistent Kubernetes workloads using Amazon EBS volumes.
 
-PostgreSQL runs as a StatefulSet and uses a PersistentVolumeClaim.
+PostgreSQL uses:
+
+```text
+StatefulSet
+PersistentVolumeClaim
+gp3 StorageClass
+AWS EBS CSI Driver
+```
 
 The storage design uses:
 
@@ -520,8 +609,8 @@ digipipeline-infra/
 |   |-- inventories/
 |   |   |-- dev/
 |   |   |   |-- hosts.ini
-|   |
-|   |-- group_vars/
+|   |   |   |-- group_vars/
+|   |   |   |   |-- all.yml
 |   |
 |   |-- playbooks/
 |   |   |
@@ -531,12 +620,15 @@ digipipeline-infra/
 |   |   |-- 01-install-argocd.yml
 |   |   |-- 02-argocd-password.yml
 |   |   |-- 03-install-aws-load-balancer-controller.yml
+|   |   |-- 04-install-ebs-csi-driver.yml
 |   |   |-- 04-configure-default-storageclass.yml
 |   |   |-- 06-install-karpenter.yml
 |   |   |-- 09-install-monitoring.yml
 |   |   |-- 10-install-platform.yml
 |   |   |-- 11-bootstrap-gitops-app.yml
 |   |   |-- 12-show-access-info.yml
+|   |   |-- 13-create-app-secrets.yml
+|   |   |-- 14-apply-db-schema.yml
 |   |   |-- 20-install-jenkins-controller.yml
 |   |   |-- 21-prepare-jenkins-agents.yml
 |   |   |-- 22-show-ci-info.yml
@@ -545,6 +637,8 @@ digipipeline-infra/
 |   |   |-- 26-open-sonarqube-access.yml
 |   |   |-- 27-setup-sonarqube-for-jenkins.yml
 |   |   |-- 27-verify-devsecops.yml
+|   |   |-- 28-install-jenkins-sonarqube-plugin.yml
+|   |   |-- 28-configure-prometheus.yml
 |   |   |-- 29-install-jenkins-github-plugins.yml
 |   |   |-- 30-install-ci.yml
 |   |   |-- 31-install-devsecops.yml
@@ -650,192 +744,309 @@ Do not delete the backend S3 bucket or DynamoDB lock table unless you intentiona
 
 ## How to Deploy
 
-Run all commands from the local control machine.
+Run all commands from the local control machine only.
 
 ```bash
 cd digipipeline-infra/ansible
 ```
 
----
-
-### 1. Prepare SSH Key Pairs
+DigiPipeline is designed to be operated through one master Ansible playbook:
 
 ```bash
-ansible-playbook playbooks/00-ensure-keypairs.yml
+ansible-playbook playbooks/99-run-all-digipipeline.yml
 ```
 
-This playbook prepares and validates the required EC2 SSH key pairs.
-
-It handles key material required for:
+The master playbook runs the platform in the correct order:
 
 ```text
-Bastion access in us-east-1
-Jenkins controller and agents in us-west-2
+Prepare SSH key pairs
+Verify cluster access
+Install Kubernetes platform tools
+Create application secrets
+Bootstrap Argo CD GitOps application
+Apply database schema fixes
+Install Jenkins CI
+Configure Jenkins plugins, agents, and ECR IAM
+Install DevSecOps tools
+Configure monitoring
+Show access information
 ```
 
 ---
 
-### 2. Build AWS Infrastructure
+## Master Playbook Usage
+
+### Normal Run
+
+Use this when the infrastructure already exists and you want to configure or repair the platform:
 
 ```bash
-ansible-playbook playbooks/00-rebuild-infra.yml
+ansible-playbook playbooks/99-run-all-digipipeline.yml
 ```
 
-This playbook runs Terraform and prepares Ansible inventory.
+This does not rebuild Terraform infrastructure and does not open local dashboard tunnels by default.
 
-It performs:
+---
 
-```text
-Terraform init
-Terraform fmt
-Terraform validate
-Terraform apply
-Terraform output parsing
-Inventory update
-Group variables update
-Bastion kubeconfig configuration
-Initial EKS verification
+### Full Infrastructure Rebuild and Platform Setup
+
+Use this after destroying infrastructure, moving to a new machine, or rebuilding the full AWS environment:
+
+```bash
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags "infra,all"
 ```
 
-Infrastructure created includes:
+This runs Terraform infrastructure rebuild and continues with the full platform installation.
+
+The flow includes:
 
 ```text
-VPC
-Public and private subnets
-Internet Gateway
-NAT Gateways
-Private EKS cluster
-Managed node group
-Bastion host
+00-ensure-keypairs.yml
+00-rebuild-infra.yml
+00-verify-cluster.yml
+10-install-platform.yml
+02-argocd-password.yml
+13-create-app-secrets.yml
+11-bootstrap-gitops-app.yml
+14-apply-db-schema.yml
+30-install-ci.yml
+29-install-jenkins-github-plugins.yml
+32-configure-jenkins-ecr-iam.yml
+32-configure-jenkins-agents.yml
+31-install-devsecops.yml
+28-install-jenkins-sonarqube-plugin.yml
+27-setup-sonarqube-for-jenkins.yml
+28-configure-prometheus.yml
+12-show-access-info.yml
+22-show-ci-info.yml
+```
+
+---
+
+### Run Only Platform Layer
+
+```bash
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags platform
+```
+
+This is useful for reinstalling or repairing:
+
+```text
+EBS CSI Driver
+Default StorageClass
+Argo CD
+AWS Load Balancer Controller
+Karpenter
+Prometheus
+Grafana
+Application secrets
+Database schema fixes
+```
+
+---
+
+### Run Only Application and GitOps Layer
+
+```bash
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags app
+```
+
+This is useful when you only want to recreate app secrets, bootstrap the Argo CD application, and apply DB schema fixes.
+
+---
+
+### Run Only CI / Jenkins Layer
+
+```bash
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags ci
+```
+
+This installs and configures:
+
+```text
 Jenkins controller
 Jenkins agents
-ECR repositories
-IAM roles and policies
-Karpenter resources
+Jenkins GitHub plugins
+Jenkins ECR IAM access
+Jenkins CI information
 ```
 
 ---
 
-### 3. Install Kubernetes Platform
+### Run Only DevSecOps Layer
 
 ```bash
-ansible-playbook playbooks/10-install-platform.yml
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags devsecops
 ```
 
-This playbook installs the core Kubernetes platform tools.
-
-It includes:
-
-```text
-Cluster verification
-Default StorageClass configuration
-Argo CD installation
-AWS Load Balancer Controller installation
-Karpenter installation
-Prometheus and Grafana installation
-Final cluster verification
-```
-
----
-
-### 4. Bootstrap GitOps Application
-
-```bash
-ansible-playbook playbooks/11-bootstrap-gitops-app.yml
-```
-
-This creates the Argo CD application that watches the GitOps repository and deploys the Kubernetes workloads.
-
----
-
-### 5. Install Jenkins CI
-
-```bash
-ansible-playbook playbooks/30-install-ci.yml
-```
-
-This installs and prepares:
-
-```text
-Jenkins controller
-Jenkins agents
-CI access information
-```
-
-Optional Jenkins automation:
-
-```bash
-ansible-playbook playbooks/29-install-jenkins-github-plugins.yml
-ansible-playbook playbooks/32-configure-jenkins-agents.yml
-ansible-playbook playbooks/32-configure-jenkins-ecr-iam.yml
-```
-
----
-
-### 6. Install DevSecOps Tools
-
-```bash
-ansible-playbook playbooks/31-install-devsecops.yml
-```
-
-This installs and verifies:
+This installs and configures:
 
 ```text
 SonarQube
 Trivy
-DevSecOps validation
-SonarQube access
-```
-
-Optional SonarQube integration with Jenkins:
-
-```bash
-ansible-playbook playbooks/27-setup-sonarqube-for-jenkins.yml
+SonarQube Jenkins integration
+SonarQube access verification
 ```
 
 ---
 
-### 7. Open Local Access Tunnels
+### Open Dashboards and Local Access Tunnels
+
+Local dashboard access is intentionally not part of the default run because local ports may already be in use.
+
+To open dashboards:
 
 ```bash
-ansible-playbook playbooks/open-all-access.yml
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
 ```
 
-This opens local tunnels for:
+This opens access to:
 
 ```text
-Argo CD
-Jenkins
-SonarQube
-Grafana
-Prometheus
+Argo CD      -> http://localhost:8080
+Jenkins      -> http://localhost:8082
+SonarQube    -> http://localhost:9000
+Grafana      -> http://localhost:3000
+Prometheus   -> http://localhost:9090
 ```
 
-Access credentials are printed by the related Ansible playbooks when available.
+If ports are already busy, stop old SSH tunnels first:
 
-Do not store real passwords or secrets directly in this README.
+```bash
+pkill -f "ssh -f -N" || true
+```
+
+Then run the access command again.
 
 ---
 
 ## Recommended Rebuild Flow
 
-For a clean rebuild, use:
+The recommended rebuild flow is now managed by the master playbook.
+
+### Fresh Full Rebuild
 
 ```bash
-ansible-playbook playbooks/00-ensure-keypairs.yml
-ansible-playbook playbooks/00-rebuild-infra.yml
-ansible-playbook playbooks/10-install-platform.yml
-ansible-playbook playbooks/11-bootstrap-gitops-app.yml
-ansible-playbook playbooks/30-install-ci.yml
-ansible-playbook playbooks/29-install-jenkins-github-plugins.yml
-ansible-playbook playbooks/32-configure-jenkins-agents.yml
-ansible-playbook playbooks/32-configure-jenkins-ecr-iam.yml
-ansible-playbook playbooks/31-install-devsecops.yml
-ansible-playbook playbooks/27-setup-sonarqube-for-jenkins.yml
-ansible-playbook playbooks/open-all-access.yml
+cd digipipeline-infra/ansible
+
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags "infra,all"
 ```
 
-After a fresh rebuild, the application images may need to be rebuilt and pushed again by Jenkins because ECR may be empty.
+### Normal Repair / Re-run
+
+```bash
+cd digipipeline-infra/ansible
+
+ansible-playbook playbooks/99-run-all-digipipeline.yml
+```
+
+### Open Access After Setup
+
+```bash
+cd digipipeline-infra/ansible
+
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
+```
+
+After a fresh rebuild, the ECR repositories may be empty. In that case, open Jenkins and run the CI pipeline to rebuild and push application images:
+
+```text
+Jenkins -> Pipeline -> Build Now
+```
+
+The Jenkins pipeline will:
+
+```text
+Build Docker images
+Push images to Amazon ECR
+Update image tags in digipipeline-gitops
+Trigger Argo CD deployment through GitOps
+```
+
+After the pipeline finishes, verify Argo CD:
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n argocd get application digipipeline-development'
+```
+
+Expected result:
+
+```text
+Synced   Healthy
+```
+
+Check application pods:
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pods'
+```
+
+Get the public application Load Balancer URL:
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get ingress auraweb-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}{\"\n\"}"'
+```
+
+Open the application:
+
+```text
+http://<ALB-DNS>
+```
+
+---
+
+## CI Build Flow
+
+Before running a Jenkins build, make sure the application repository is committed and pushed:
+
+```bash
+cd digipipeline-app
+
+git status
+git add .
+git commit -m "update application changes" || true
+git push origin main
+```
+
+Open Jenkins:
+
+```bash
+cd digipipeline-infra/ansible
+
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
+```
+
+Then open:
+
+```text
+http://localhost:8082
+```
+
+Run:
+
+```text
+Jenkins -> Pipeline -> Build Now
+```
+
+After the build succeeds, Jenkins should update image tags in:
+
+```text
+digipipeline-gitops
+```
+
+Then verify:
+
+```bash
+cd digipipeline-infra/ansible
+
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n argocd get application digipipeline-development'
+```
+
+Expected:
+
+```text
+Synced   Healthy
+```
 
 ---
 
@@ -865,6 +1076,24 @@ ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n argocd
 ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get all'
 ```
 
+### Check application pods
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pods'
+```
+
+### Check services and ingress
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get svc,ingress'
+```
+
+### Get application Load Balancer URL
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get ingress auraweb-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}{\"\n\"}"'
+```
+
 ### Check persistent volume claims
 
 ```bash
@@ -888,6 +1117,72 @@ ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n monito
 ```bash
 ansible-playbook playbooks/12-show-access-info.yml
 ansible-playbook playbooks/22-show-ci-info.yml
+```
+
+### Check current deployed image
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get deployment frontend -o jsonpath="{.spec.template.spec.containers[0].image}{\"\n\"}"'
+```
+
+### Check backend logs
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev logs deployment/user-auth --tail=150'
+```
+
+### Follow backend logs live
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev logs -f deployment/user-auth --tail=100'
+```
+
+### Check gateway access logs
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev logs deployment/gateway --since=20m | grep -Ei "api/auth|login|register|me|POST|GET|401|403|404|500"'
+```
+
+---
+
+## Application Debugging
+
+### Test login API
+
+```bash
+cd digipipeline-infra/ansible
+
+ALB=$(ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get ingress auraweb-ingress -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"' | tail -1)
+
+curl -i "http://$ALB/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"your-email@example.com","password":"your-password"}'
+```
+
+### Test current user endpoint
+
+```bash
+TOKEN="<JWT_TOKEN>"
+
+curl -i "http://$ALB/api/auth/me" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Do not share real JWT tokens publicly or in screenshots.
+
+### Clear browser storage after frontend auth changes
+
+From browser console:
+
+```js
+localStorage.clear();
+sessionStorage.clear();
+```
+
+Then hard refresh:
+
+```text
+Ctrl + Shift + R
 ```
 
 ---
@@ -1010,6 +1305,72 @@ This is safe for the demo development environment, but it deletes PostgreSQL dat
 
 ---
 
+### PostgreSQL fails with lost+found error
+
+If PostgreSQL logs show:
+
+```text
+initdb: error: directory "/var/lib/postgresql/data" exists but is not empty
+It contains a lost+found directory
+```
+
+Set:
+
+```text
+PGDATA=/var/lib/postgresql/data/pgdata
+```
+
+inside the PostgreSQL StatefulSet manifest in the GitOps repository.
+
+Example:
+
+```yaml
+- name: PGDATA
+  value: /var/lib/postgresql/data/pgdata
+```
+
+---
+
+### Missing app-secrets
+
+If pods fail with:
+
+```text
+secret "app-secrets" not found
+```
+
+or a specific missing key, run:
+
+```bash
+ansible-playbook playbooks/13-create-app-secrets.yml
+```
+
+Then restart affected pods:
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev rollout restart deployment'
+```
+
+---
+
+### Database schema mismatch
+
+If backend logs show errors such as:
+
+```text
+column "password_hash" of relation "users" does not exist
+```
+
+run:
+
+```bash
+ansible-playbook playbooks/14-apply-db-schema.yml
+```
+
+Then retry the application request.
+
+---
+
 ### Argo CD shows OutOfSync or Degraded
 
 Check Argo CD application resources:
@@ -1035,6 +1396,20 @@ Missing Secret
 Missing ConfigMap
 Wrong image tag
 Empty ECR repository after rebuild
+Kustomize patch error
+StatefulSet immutable field change
+```
+
+To refresh Argo CD:
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n argocd patch application digipipeline-development --type merge -p "{\"metadata\":{\"annotations\":{\"argocd.argoproj.io/refresh\":\"hard\"}}}"'
+```
+
+To sync Argo CD:
+
+```bash
+ansible bastion -m shell -a 'kubectl --kubeconfig "$HOME/.kube/config" -n argocd patch application digipipeline-development --type merge -p "{\"operation\":{\"sync\":{\"revision\":\"main\"}}}"'
 ```
 
 ---
@@ -1052,8 +1427,8 @@ terraform force-unlock -force <LOCK_ID>
 Then retry the operation:
 
 ```bash
-terraform plan -destroy -out=destroy.tfplan
-terraform apply destroy.tfplan
+terraform plan
+terraform apply
 ```
 
 ---
@@ -1071,6 +1446,71 @@ Ansible inventory
 ```
 
 If the goal is to destroy everything and Bastion is unreachable, use Terraform destroy directly from the local machine.
+
+---
+
+### Jenkins is not opening locally
+
+Open access tunnels:
+
+```bash
+ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
+```
+
+If local ports are busy:
+
+```bash
+pkill -f "ssh -f -N" || true
+```
+
+Then run the access command again.
+
+---
+
+### Application returns 405 on signup or login
+
+If the browser shows:
+
+```text
+405 Not Allowed
+```
+
+for:
+
+```text
+POST /api/auth/register
+POST /api/auth/login
+```
+
+check the GitOps ingress file.
+
+The ingress must route:
+
+```text
+/api -> gateway
+/    -> frontend
+```
+
+Example:
+
+```yaml
+paths:
+  - path: /api
+    pathType: Prefix
+    backend:
+      service:
+        name: gateway
+        port:
+          number: 80
+
+  - path: /
+    pathType: Prefix
+    backend:
+      service:
+        name: frontend
+        port:
+          number: 80
+```
 
 ---
 
@@ -1094,6 +1534,8 @@ Use IRSA for Kubernetes service accounts
 Use private container registry access controls
 Enable image signing and policy enforcement
 ```
+
+Do not commit real passwords, tokens, private keys, kubeconfig files, or Terraform state files.
 
 ---
 
@@ -1158,6 +1600,8 @@ Jenkins agents setup: Implemented
 ECR integration: Implemented
 Argo CD setup: Implemented
 GitOps app bootstrap: Implemented
+Application secrets automation: Implemented
+Database schema automation: Implemented
 Monitoring setup: Implemented
 Persistent storage automation: Implemented
 DevSecOps tooling: Implemented
@@ -1168,6 +1612,6 @@ Access automation: Implemented
 
 ## Author
 
-Built by Ahmed Rabie as part of a hands-on DevOps and Cloud Engineering portfolio project.
+Built by ahmedrabie as part of a hands-on DevOps and Cloud Engineering portfolio project.
 
 GitHub: `ahmedrabe33`

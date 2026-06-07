@@ -7,13 +7,16 @@
   vars_files:
     - ../inventories/dev/group_vars/all.yml
 
+  vars:
+    account_id_value: "{{ aws_account_id.stdout if aws_account_id is mapping else aws_account_id }}"
+
   tasks:
     - name: Check required local variables
       ansible.builtin.assert:
         that:
           - aws_profile is defined
           - aws_region is defined
-          - aws_account_id is defined
+          - account_id_value is defined
           - cluster_name is defined
           - aws_lbc_policy_name is defined
           - aws_lbc_role_name is defined
@@ -25,8 +28,12 @@
       ansible.builtin.shell: |
         set -euo pipefail
 
-        POLICY_ARN="arn:aws:iam::{{ aws_account_id }}:policy/{{ aws_lbc_policy_name }}"
-        ROLE_ARN="arn:aws:iam::{{ aws_account_id }}:role/{{ aws_lbc_role_name }}"
+        ACCOUNT_ID="{{ account_id_value }}"
+        POLICY_NAME="{{ aws_lbc_policy_name }}"
+        ROLE_NAME="{{ aws_lbc_role_name }}"
+
+        POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}"
+        ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
 
         OIDC_URL=$(aws eks describe-cluster \
           --region "{{ aws_region }}" \
@@ -37,21 +44,30 @@
 
         OIDC_PROVIDER="${OIDC_URL#https://}"
 
+        echo "ACCOUNT_ID=$ACCOUNT_ID"
         echo "OIDC_URL=$OIDC_URL"
         echo "OIDC_PROVIDER=$OIDC_PROVIDER"
+        echo "POLICY_ARN=$POLICY_ARN"
+        echo "ROLE_ARN=$ROLE_ARN"
 
         curl -fsSL \
           https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json \
           -o /tmp/aws-load-balancer-controller-iam-policy.json
 
-        if aws iam get-policy \
+        EXISTING_POLICY_ARN=$(aws iam list-policies \
           --profile "{{ aws_profile }}" \
-          --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
-          echo "IAM policy already exists: $POLICY_ARN"
+          --scope Local \
+          --query "Policies[?PolicyName=='${POLICY_NAME}'].Arn | [0]" \
+          --output text)
+
+        if [ "$EXISTING_POLICY_ARN" != "None" ] && [ -n "$EXISTING_POLICY_ARN" ]; then
+          echo "IAM policy already exists: $EXISTING_POLICY_ARN"
+          POLICY_ARN="$EXISTING_POLICY_ARN"
         else
+          echo "Creating IAM policy: $POLICY_NAME"
           aws iam create-policy \
             --profile "{{ aws_profile }}" \
-            --policy-name "{{ aws_lbc_policy_name }}" \
+            --policy-name "$POLICY_NAME" \
             --policy-document file:///tmp/aws-load-balancer-controller-iam-policy.json
         fi
 
@@ -62,7 +78,7 @@
             {
               "Effect": "Allow",
               "Principal": {
-                "Federated": "arn:aws:iam::{{ aws_account_id }}:oidc-provider/${OIDC_PROVIDER}"
+                "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC_PROVIDER}"
               },
               "Action": "sts:AssumeRoleWithWebIdentity",
               "Condition": {
@@ -78,22 +94,23 @@
 
         if aws iam get-role \
           --profile "{{ aws_profile }}" \
-          --role-name "{{ aws_lbc_role_name }}" >/dev/null 2>&1; then
+          --role-name "$ROLE_NAME" >/dev/null 2>&1; then
           echo "IAM role already exists. Updating trust policy..."
           aws iam update-assume-role-policy \
             --profile "{{ aws_profile }}" \
-            --role-name "{{ aws_lbc_role_name }}" \
+            --role-name "$ROLE_NAME" \
             --policy-document file:///tmp/aws-lbc-trust-policy.json
         else
+          echo "Creating IAM role: $ROLE_NAME"
           aws iam create-role \
             --profile "{{ aws_profile }}" \
-            --role-name "{{ aws_lbc_role_name }}" \
+            --role-name "$ROLE_NAME" \
             --assume-role-policy-document file:///tmp/aws-lbc-trust-policy.json
         fi
 
         aws iam attach-role-policy \
           --profile "{{ aws_profile }}" \
-          --role-name "{{ aws_lbc_role_name }}" \
+          --role-name "$ROLE_NAME" \
           --policy-arn "$POLICY_ARN" || true
 
         echo "LBC_POLICY_ARN=$POLICY_ARN"
@@ -102,8 +119,8 @@
         executable: /bin/bash
       register: iam_output
       changed_when: >
-        'create-policy' in iam_output.stdout or
-        'create-role' in iam_output.stdout or
+        'Creating IAM policy' in iam_output.stdout or
+        'Creating IAM role' in iam_output.stdout or
         'Updating trust policy' in iam_output.stdout
 
     - name: Show IAM result
@@ -118,6 +135,9 @@
   vars_files:
     - ../inventories/dev/group_vars/all.yml
 
+  vars:
+    account_id_value: "{{ aws_account_id.stdout if aws_account_id is mapping else aws_account_id }}"
+
   tasks:
     - name: Check required variables
       ansible.builtin.assert:
@@ -125,7 +145,7 @@
           - aws_region is defined
           - cluster_name is defined
           - vpc_id is defined
-          - aws_account_id is defined
+          - account_id_value is defined
           - aws_lbc_role_name is defined
           - aws_lbc_namespace is defined
           - aws_lbc_service_account_name is defined
@@ -196,7 +216,7 @@
           --set vpcId="{{ vpc_id }}" \
           --set serviceAccount.create=true \
           --set serviceAccount.name="{{ aws_lbc_service_account_name }}" \
-          --set-string "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::{{ aws_account_id }}:role/{{ aws_lbc_role_name }}" \
+          --set-string "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::{{ account_id_value }}:role/{{ aws_lbc_role_name }}" \
           --wait \
           --timeout 10m
       args:
@@ -258,4 +278,4 @@
           - "AWS Load Balancer Controller is ready."
           - "Namespace: {{ aws_lbc_namespace }}"
           - "ServiceAccount: {{ aws_lbc_service_account_name }}"
-          - "IAM Role: arn:aws:iam::{{ aws_account_id }}:role/{{ aws_lbc_role_name }}"
+          - "IAM Role: arn:aws:iam::{{ account_id_value }}:role/{{ aws_lbc_role_name }}"

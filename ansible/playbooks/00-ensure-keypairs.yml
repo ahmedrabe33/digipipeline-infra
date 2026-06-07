@@ -1,231 +1,223 @@
 ---
-- name: Ensure DigiPipeline SSH key exists locally and in AWS
+- name: Ensure DigiPipeline SSH key pairs exist locally and in AWS
   hosts: localhost
+  connection: local
   gather_facts: false
 
   vars:
-    aws_profile: "{{ lookup('env', 'AWS_PROFILE') | default('default', true) }}"
-    eks_region: "{{ lookup('env', 'EKS_REGION') | default('us-east-1', true) }}"
-    jenkins_region: "{{ lookup('env', 'JENKINS_REGION') | default('us-west-2', true) }}"
+    aws_profile: "default"
+
+    eks_region: "us-east-1"
+    jenkins_region: "us-west-2"
 
     key_name: "devops-ha-eks-bastion-key"
 
-    ssh_dir: "{{ lookup('env', 'HOME') }}/.ssh"
     private_key_path: "{{ lookup('env', 'HOME') }}/.ssh/devops-ha-eks-bastion-key.pem"
     public_key_path: "{{ lookup('env', 'HOME') }}/.ssh/devops-ha-eks-bastion-key.pem.pub"
 
     terraform_dir: "{{ playbook_dir }}/../../infra/terraform"
-    reset_keys: false
+    terraform_tfvars_path: "{{ terraform_dir }}/terraform.tfvars"
 
   tasks:
-    - name: Ensure SSH directory exists
+    - name: Show key configuration
+      ansible.builtin.debug:
+        msg:
+          - "Private key: {{ private_key_path }}"
+          - "Public key: {{ public_key_path }}"
+          - "AWS key name: {{ key_name }}"
+          - "EKS region: {{ eks_region }}"
+          - "Jenkins region: {{ jenkins_region }}"
+          - "Terraform tfvars: {{ terraform_tfvars_path }}"
+
+    - name: Ensure local .ssh directory exists
       ansible.builtin.file:
-        path: "{{ ssh_dir }}"
+        path: "{{ lookup('env', 'HOME') }}/.ssh"
         state: directory
         mode: "0700"
 
-    - name: Delete local keys when reset_keys=true
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "{{ private_key_path }}"
-        - "{{ public_key_path }}"
-      when: reset_keys | bool
-
-    - name: Delete AWS key pairs when reset_keys=true
-      ansible.builtin.shell: |
-        set +e
-        for REGION in "{{ eks_region }}" "{{ jenkins_region }}"; do
-          echo "Deleting AWS key pair in $REGION"
-          aws ec2 delete-key-pair \
-            --region "$REGION" \
-            --profile "{{ aws_profile }}" \
-            --key-name "{{ key_name }}" || true
-        done
-      args:
-        executable: /bin/bash
-      when: reset_keys | bool
-
-    - name: Check local private key
+    - name: Check if local private key exists
       ansible.builtin.stat:
         path: "{{ private_key_path }}"
-      register: local_key
+      register: private_key_stat
 
-    - name: Delete AWS key pairs if local key is missing
-      ansible.builtin.shell: |
-        set +e
-        for REGION in "{{ eks_region }}" "{{ jenkins_region }}"; do
-          echo "Local key missing, deleting old AWS key pair in $REGION"
-          aws ec2 delete-key-pair \
-            --region "$REGION" \
-            --profile "{{ aws_profile }}" \
-            --key-name "{{ key_name }}" || true
-        done
-      args:
-        executable: /bin/bash
-      when: not local_key.stat.exists
+    - name: Generate local SSH key pair if missing
+      ansible.builtin.command: >
+        ssh-keygen
+        -t rsa
+        -b 4096
+        -f {{ private_key_path }}
+        -N ""
+        -C "digipipeline"
+      when: not private_key_stat.stat.exists
 
-    - name: Create AWS key pair and download private key locally if missing
-      ansible.builtin.shell: |
-        set -e
-        aws ec2 create-key-pair \
-          --region "{{ eks_region }}" \
-          --profile "{{ aws_profile }}" \
-          --key-name "{{ key_name }}" \
-          --key-type rsa \
-          --key-format pem \
-          --query "KeyMaterial" \
-          --output text > "{{ private_key_path }}"
-
-        chmod 600 "{{ private_key_path }}"
-      args:
-        executable: /bin/bash
-      no_log: true
-      when: not local_key.stat.exists
-
-    - name: Secure private key permissions
+    - name: Ensure private key permissions are secure
       ansible.builtin.file:
         path: "{{ private_key_path }}"
-        mode: "0600"
+        mode: "0400"
 
-    - name: Generate public key from private key
+    - name: Ensure public key exists from private key
       ansible.builtin.shell: |
-        set -e
-        ssh-keygen -y -f "{{ private_key_path }}" > "{{ public_key_path }}"
-        chmod 644 "{{ public_key_path }}"
+        set -euo pipefail
+
+        if [ ! -f "{{ public_key_path }}" ]; then
+          ssh-keygen -y -f "{{ private_key_path }}" > "{{ public_key_path }}"
+        fi
       args:
         executable: /bin/bash
+
+    - name: Ensure public key permissions
+      ansible.builtin.file:
+        path: "{{ public_key_path }}"
+        mode: "0644"
+
+    - name: Get current public IP
+      ansible.builtin.uri:
+        url: https://checkip.amazonaws.com
+        return_content: true
+      register: public_ip_result
+
+    - name: Set current public IP CIDR
+      ansible.builtin.set_fact:
+        current_public_ip_cidr: "{{ public_ip_result.content | trim }}/32"
+
+    - name: Show detected public IP CIDR
+      ansible.builtin.debug:
+        msg: "Current public IP CIDR: {{ current_public_ip_cidr }}"
+
+    - name: Ensure terraform.tfvars exists
+      ansible.builtin.copy:
+        dest: "{{ terraform_tfvars_path }}"
+        content: ""
+        force: false
+        mode: "0644"
+
+    - name: Update key_name in terraform.tfvars
+      ansible.builtin.lineinfile:
+        path: "{{ terraform_tfvars_path }}"
+        regexp: '^key_name\s*='
+        line: 'key_name = "{{ key_name }}"'
+        create: true
+
+    - name: Update my_ip_cidr in terraform.tfvars
+      ansible.builtin.lineinfile:
+        path: "{{ terraform_tfvars_path }}"
+        regexp: '^my_ip_cidr\s*='
+        line: 'my_ip_cidr = "{{ current_public_ip_cidr }}"'
+        create: true
 
     - name: Ensure AWS key pair exists and matches local key in both regions
       ansible.builtin.shell: |
-        set -e
+        set -euo pipefail
+
+        LOCAL_SHA="$(sha256sum "{{ public_key_path }}" | awk '{print $1}')"
+
+        import_key_pair() {
+          REGION="$1"
+
+          echo "Importing key pair in $REGION"
+
+          for ATTEMPT in 1 2 3 4 5; do
+            if aws ec2 import-key-pair \
+              --region "$REGION" \
+              --profile "{{ aws_profile }}" \
+              --key-name "{{ key_name }}" \
+              --public-key-material "fileb://{{ public_key_path }}" \
+              --tag-specifications "ResourceType=key-pair,Tags=[{Key=Project,Value=digipipeline},{Key=Name,Value={{ key_name }}},{Key=DigiPipelinePublicKeySha256,Value=$LOCAL_SHA}]"; then
+              return 0
+            fi
+
+            echo "Import failed in $REGION, retrying in 3 seconds..."
+            sleep 3
+          done
+
+          echo "Failed to import key pair in $REGION"
+          return 1
+        }
 
         for REGION in "{{ eks_region }}" "{{ jenkins_region }}"; do
           echo "===== Checking $REGION ====="
 
-          AWS_PUB="/tmp/aws-{{ key_name }}-$REGION.pub"
-
-          if aws ec2 describe-key-pairs \
+          KEY_EXISTS="$(aws ec2 describe-key-pairs \
             --region "$REGION" \
             --profile "{{ aws_profile }}" \
             --key-names "{{ key_name }}" \
-            --include-public-key \
-            --query "KeyPairs[0].PublicKey" \
-            --output text > "$AWS_PUB" 2>/dev/null; then
+            --query "KeyPairs[0].KeyName" \
+            --output text 2>/dev/null || echo "__MISSING__")"
 
-            if diff -q "{{ public_key_path }}" "$AWS_PUB" >/dev/null; then
-              echo "MATCH in $REGION"
-            else
-              echo "MISMATCH in $REGION, replacing key pair"
+          if [ "$KEY_EXISTS" = "__MISSING__" ]; then
+            echo "MISSING in $REGION"
+            import_key_pair "$REGION"
+            continue
+          fi
 
-              aws ec2 delete-key-pair \
-                --region "$REGION" \
-                --profile "{{ aws_profile }}" \
-                --key-name "{{ key_name }}" || true
+          CURRENT_SHA="$(aws ec2 describe-key-pairs \
+            --region "$REGION" \
+            --profile "{{ aws_profile }}" \
+            --key-names "{{ key_name }}" \
+            --query "KeyPairs[0].Tags[?Key=='DigiPipelinePublicKeySha256'].Value | [0]" \
+            --output text 2>/dev/null || echo "")"
 
-              aws ec2 import-key-pair \
-                --region "$REGION" \
-                --profile "{{ aws_profile }}" \
-                --key-name "{{ key_name }}" \
-                --public-key-material "fileb://{{ public_key_path }}"
-            fi
+          if [ "$CURRENT_SHA" = "None" ]; then
+            CURRENT_SHA=""
+          fi
 
+          if [ "$CURRENT_SHA" = "$LOCAL_SHA" ]; then
+            echo "MATCH in $REGION"
           else
-            echo "MISSING in $REGION, importing key pair"
+            echo "MISMATCH or untagged key in $REGION"
+            echo "Replacing key pair in $REGION"
 
-            aws ec2 import-key-pair \
+            aws ec2 delete-key-pair \
               --region "$REGION" \
               --profile "{{ aws_profile }}" \
-              --key-name "{{ key_name }}" \
-              --public-key-material "fileb://{{ public_key_path }}"
+              --key-name "{{ key_name }}" || true
+
+            sleep 5
+
+            import_key_pair "$REGION"
           fi
         done
       args:
         executable: /bin/bash
 
-    - name: Create terraform.tfvars if missing
-      ansible.builtin.shell: |
-        set -e
-        cd "{{ terraform_dir }}"
-
-        if [ ! -f terraform.tfvars ] && [ -f terraform.tfvars.example ]; then
-          cp terraform.tfvars.example terraform.tfvars
-        fi
-      args:
-        executable: /bin/bash
-
-    - name: Get current public IP
-      ansible.builtin.shell: |
-        curl -s https://checkip.amazonaws.com | tr -d '\n'
-      register: current_ip
-      changed_when: false
-
-    - name: Update terraform.tfvars
-      ansible.builtin.lineinfile:
-        path: "{{ terraform_dir }}/terraform.tfvars"
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-        create: true
-      loop:
-        - regexp: '^key_name\s*='
-          line: 'key_name = "{{ key_name }}"'
-        - regexp: '^my_ip_cidr\s*='
-          line: 'my_ip_cidr = "{{ current_ip.stdout }}/32"'
-        - regexp: '^public_key_path\s*='
-          line: 'public_key_path = "{{ public_key_path }}"'
-        - regexp: '^private_key_path\s*='
-          line: 'private_key_path = "{{ private_key_path }}"'
-
-    - name: Terraform init
-      ansible.builtin.command:
-        cmd: terraform init
-        chdir: "{{ terraform_dir }}"
-
-    - name: Import Jenkins key pair into Terraform state if resource exists
-      ansible.builtin.shell: |
-        set +e
-        cd "{{ terraform_dir }}"
-
-        if terraform state list 2>/dev/null | grep -qx "module.jenkins.aws_key_pair.jenkins"; then
-          echo "Key pair already imported in Terraform state"
-        else
-          terraform import module.jenkins.aws_key_pair.jenkins "{{ key_name }}" || true
-        fi
-      args:
-        executable: /bin/bash
-
     - name: Final key verification
       ansible.builtin.shell: |
-        set -e
+        set -euo pipefail
 
-        ssh-keygen -y -f "{{ private_key_path }}" > /tmp/local-final-key.pub
+        LOCAL_SHA="$(sha256sum "{{ public_key_path }}" | awk '{print $1}')"
 
         for REGION in "{{ eks_region }}" "{{ jenkins_region }}"; do
           echo "===== $REGION ====="
 
-          aws ec2 describe-key-pairs \
+          CURRENT_SHA="$(aws ec2 describe-key-pairs \
             --region "$REGION" \
             --profile "{{ aws_profile }}" \
             --key-names "{{ key_name }}" \
-            --include-public-key \
-            --query "KeyPairs[0].PublicKey" \
-            --output text > "/tmp/aws-final-key-$REGION.pub"
+            --query "KeyPairs[0].Tags[?Key=='DigiPipelinePublicKeySha256'].Value | [0]" \
+            --output text)"
 
-          diff -q /tmp/local-final-key.pub "/tmp/aws-final-key-$REGION.pub" \
-            && echo "MATCH" \
-            || echo "MISMATCH"
+          if [ "$CURRENT_SHA" = "$LOCAL_SHA" ]; then
+            echo "MATCH"
+          else
+            echo "MISMATCH"
+            echo "Local SHA: $LOCAL_SHA"
+            echo "AWS SHA  : $CURRENT_SHA"
+            exit 1
+          fi
         done
       args:
         executable: /bin/bash
-      register: final_check
+      register: final_key_check
       changed_when: false
 
-    - name: Print result
+    - name: Show final verification result
+      ansible.builtin.debug:
+        var: final_key_check.stdout_lines
+
+    - name: Show next step
       ansible.builtin.debug:
         msg:
-          - "Private key: {{ private_key_path }}"
-          - "Public key : {{ public_key_path }}"
-          - "Key name   : {{ key_name }}"
-          - "Home CIDR  : {{ current_ip.stdout }}/32"
-          - "{{ final_check.stdout_lines }}"
+          - "Key pairs are ready in {{ eks_region }} and {{ jenkins_region }}."
+          - "terraform.tfvars updated with key_name and my_ip_cidr."
+          - "Next command:"
+          - "ansible-playbook playbooks/00-rebuild-infra.yml"

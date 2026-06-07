@@ -1,6 +1,8 @@
 ---
 - import_playbook: 00-verify-cluster.yml
 
+- import_playbook: 04-install-ebs-csi-driver.yml
+
 - import_playbook: 04-configure-default-storageclass.yml
 
 - import_playbook: 01-install-argocd.yml
