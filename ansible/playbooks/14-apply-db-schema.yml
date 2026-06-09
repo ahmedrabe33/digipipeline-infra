@@ -21,30 +21,71 @@
         executable: /bin/bash
       changed_when: false
 
-    - name: Rename users.password to users.password_hash if needed
+    - name: Create or fix users and sessions tables
       ansible.builtin.shell: |
         set -e
 
         cat <<'SQL' | kubectl --kubeconfig "{{ kubeconfig }}" \
           -n "{{ app_namespace }}" \
-          exec -i "{{ postgres_pod }}" -- sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+          exec -i "{{ postgres_pod }}" -- sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+        CREATE TABLE IF NOT EXISTS public.users (
+          id SERIAL PRIMARY KEY,
+          email VARCHAR(255) UNIQUE NOT NULL,
+          password_hash TEXT,
+          name VARCHAR(255),
+          first_name VARCHAR(255) DEFAULT '',
+          last_name VARCHAR(255) DEFAULT '',
+          role VARCHAR(50) DEFAULT 'user',
+          is_active BOOLEAN DEFAULT true,
+          email_verified BOOLEAN DEFAULT false,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+          last_login TIMESTAMP WITHOUT TIME ZONE
+        );
+
         DO $$
         BEGIN
           IF EXISTS (
-            SELECT 1 FROM information_schema.columns
+            SELECT 1
+            FROM information_schema.columns
             WHERE table_schema = 'public'
               AND table_name = 'users'
               AND column_name = 'password'
           )
           AND NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
+            SELECT 1
+            FROM information_schema.columns
             WHERE table_schema = 'public'
               AND table_name = 'users'
               AND column_name = 'password_hash'
-          ) THEN
+          )
+          THEN
             ALTER TABLE public.users RENAME COLUMN password TO password_hash;
           END IF;
         END $$;
+
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS name VARCHAR(255);
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS first_name VARCHAR(255) DEFAULT '';
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS last_name VARCHAR(255) DEFAULT '';
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'user';
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false;
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW();
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW();
+        ALTER TABLE public.users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP WITHOUT TIME ZONE;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON public.users (email);
+
+        CREATE TABLE IF NOT EXISTS public.sessions (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER REFERENCES public.users(id) ON DELETE CASCADE,
+          refresh_token TEXT,
+          expires_at TIMESTAMP WITHOUT TIME ZONE,
+          ip_address VARCHAR(100),
+          user_agent TEXT,
+          created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        );
         SQL
       args:
         executable: /bin/bash
@@ -66,3 +107,20 @@
     - name: Print users table schema
       ansible.builtin.debug:
         var: users_schema.stdout_lines
+
+    - name: Show sessions table schema
+      ansible.builtin.shell: |
+        set -e
+
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ app_namespace }}" \
+          exec "{{ postgres_pod }}" -- sh -lc \
+          'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d sessions"'
+      args:
+        executable: /bin/bash
+      register: sessions_schema
+      changed_when: false
+
+    - name: Print sessions table schema
+      ansible.builtin.debug:
+        var: sessions_schema.stdout_lines

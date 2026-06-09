@@ -1,0 +1,354 @@
+---
+- name: Prepare IAM role and install CloudWatch Observability EKS Add-on
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  vars:
+    aws_profile: "default"
+    cloudwatch_namespace: "amazon-cloudwatch"
+    cloudwatch_service_account: "cloudwatch-agent"
+    cloudwatch_role_name: "{{ cluster_name }}-cloudwatch-observability-role"
+    cloudwatch_trust_policy_path: "/tmp/cloudwatch-observability-pod-identity-trust.json"
+
+  tasks:
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - aws_region is defined
+          - cluster_name is defined
+        fail_msg: "Missing aws_region or cluster_name. Run 00-rebuild-infra.yml first."
+
+    - name: Check required local tools
+      ansible.builtin.shell: |
+        set -e
+        command -v aws
+        command -v jq
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Get AWS account ID
+      ansible.builtin.shell: |
+        aws sts get-caller-identity \
+          --profile "{{ aws_profile }}" \
+          --query Account \
+          --output text
+      args:
+        executable: /bin/bash
+      register: aws_account_id
+      changed_when: false
+
+    - name: Set CloudWatch role ARN
+      ansible.builtin.set_fact:
+        cloudwatch_role_arn: "arn:aws:iam::{{ aws_account_id.stdout }}:role/{{ cloudwatch_role_name }}"
+
+    - name: Create Pod Identity trust policy file
+      ansible.builtin.copy:
+        dest: "{{ cloudwatch_trust_policy_path }}"
+        mode: "0644"
+        content: |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "pods.eks.amazonaws.com"
+                },
+                "Action": [
+                  "sts:AssumeRole",
+                  "sts:TagSession"
+                ]
+              }
+            ]
+          }
+
+    - name: Check if CloudWatch IAM role exists
+      ansible.builtin.shell: |
+        aws iam get-role \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ cloudwatch_role_name }}" \
+          --query "Role.Arn" \
+          --output text 2>/dev/null || echo "MISSING"
+      args:
+        executable: /bin/bash
+      register: cloudwatch_role_check
+      changed_when: false
+
+    - name: Create CloudWatch IAM role if missing
+      ansible.builtin.shell: |
+        aws iam create-role \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ cloudwatch_role_name }}" \
+          --assume-role-policy-document file://{{ cloudwatch_trust_policy_path }}
+      args:
+        executable: /bin/bash
+      when: cloudwatch_role_check.stdout == "MISSING"
+
+    - name: Attach CloudWatchAgentServerPolicy to CloudWatch IAM role
+      ansible.builtin.shell: |
+        aws iam attach-role-policy \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ cloudwatch_role_name }}" \
+          --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Attach AWSXrayWriteOnlyAccess to CloudWatch IAM role
+      ansible.builtin.shell: |
+        aws iam attach-role-policy \
+          --profile "{{ aws_profile }}" \
+          --role-name "{{ cloudwatch_role_name }}" \
+          --policy-arn arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Wait for IAM propagation
+      ansible.builtin.pause:
+        seconds: 20
+
+    - name: Check EKS Pod Identity Agent add-on
+      ansible.builtin.shell: |
+        aws eks describe-addon \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name eks-pod-identity-agent \
+          --query "addon.status" \
+          --output text 2>/dev/null || echo "MISSING"
+      args:
+        executable: /bin/bash
+      register: pod_identity_agent_check
+      changed_when: false
+
+    - name: Install EKS Pod Identity Agent add-on if missing
+      ansible.builtin.shell: |
+        aws eks create-addon \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name eks-pod-identity-agent \
+          --resolve-conflicts OVERWRITE
+      args:
+        executable: /bin/bash
+      when: pod_identity_agent_check.stdout == "MISSING"
+
+    - name: Wait for EKS Pod Identity Agent add-on to become ACTIVE
+      ansible.builtin.shell: |
+        aws eks wait addon-active \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name eks-pod-identity-agent
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Check CloudWatch Observability add-on
+      ansible.builtin.shell: |
+        aws eks describe-addon \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name amazon-cloudwatch-observability \
+          --query "addon.status" \
+          --output text 2>/dev/null || echo "MISSING"
+      args:
+        executable: /bin/bash
+      register: cloudwatch_addon_check
+      changed_when: false
+
+    - name: Create CloudWatch Observability add-on if missing
+      ansible.builtin.shell: |
+        aws eks create-addon \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name amazon-cloudwatch-observability \
+          --pod-identity-associations serviceAccount="{{ cloudwatch_service_account }}",roleArn="{{ cloudwatch_role_arn }}" \
+          --resolve-conflicts OVERWRITE
+      args:
+        executable: /bin/bash
+      register: cloudwatch_create_result
+      when: cloudwatch_addon_check.stdout == "MISSING"
+
+    - name: Update CloudWatch Observability add-on if already exists
+      ansible.builtin.shell: |
+        aws eks update-addon \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name amazon-cloudwatch-observability \
+          --pod-identity-associations serviceAccount="{{ cloudwatch_service_account }}",roleArn="{{ cloudwatch_role_arn }}" \
+          --resolve-conflicts OVERWRITE
+      args:
+        executable: /bin/bash
+      register: cloudwatch_update_result
+      when: cloudwatch_addon_check.stdout != "MISSING"
+      failed_when: false
+      changed_when: "'update' in cloudwatch_update_result.stdout or cloudwatch_update_result.rc == 0"
+
+    - name: Wait for CloudWatch Observability add-on to become ACTIVE
+      ansible.builtin.shell: |
+        aws eks wait addon-active \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name amazon-cloudwatch-observability
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show CloudWatch Observability add-on status
+      ansible.builtin.shell: |
+        aws eks describe-addon \
+          --region "{{ aws_region }}" \
+          --profile "{{ aws_profile }}" \
+          --cluster-name "{{ cluster_name }}" \
+          --addon-name amazon-cloudwatch-observability \
+          --query "addon.{Name:addonName,Status:status,Version:addonVersion}" \
+          --output table
+      args:
+        executable: /bin/bash
+      register: cloudwatch_addon_status
+      changed_when: false
+
+    - name: Print CloudWatch Observability add-on status
+      ansible.builtin.debug:
+        var: cloudwatch_addon_status.stdout_lines
+
+    - name: Show CloudWatch next steps
+      ansible.builtin.debug:
+        msg:
+          - "CloudWatch Observability add-on installed or updated successfully."
+          - "IAM role: {{ cloudwatch_role_arn }}"
+          - "Expected namespace: {{ cloudwatch_namespace }}"
+          - "AWS Console path: CloudWatch -> Container Insights"
+          - "AWS Console path: CloudWatch -> Logs -> Log groups"
+
+
+- name: Verify CloudWatch Observability inside EKS through Bastion
+  hosts: bastion
+  gather_facts: false
+
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
+  vars:
+    kubeconfig: "$HOME/.kube/config"
+    cloudwatch_namespace: "amazon-cloudwatch"
+
+  tasks:
+    - name: Check required variables
+      ansible.builtin.assert:
+        that:
+          - aws_region is defined
+          - cluster_name is defined
+        fail_msg: "Missing aws_region or cluster_name. Run 00-rebuild-infra.yml first."
+
+    - name: Check required tools on Bastion
+      ansible.builtin.shell: |
+        set -e
+        command -v aws
+        command -v kubectl
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Update kubeconfig on Bastion
+      ansible.builtin.shell: |
+        set -e
+
+        mkdir -p "$HOME/.kube"
+
+        aws eks update-kubeconfig \
+          --region "{{ aws_region }}" \
+          --name "{{ cluster_name }}" \
+          --alias "{{ cluster_name }}" \
+          --kubeconfig "{{ kubeconfig }}"
+
+        chmod 700 "$HOME/.kube"
+        chmod 600 "{{ kubeconfig }}"
+
+        kubectl --kubeconfig "{{ kubeconfig }}" config current-context
+      args:
+        executable: /bin/bash
+      register: kubeconfig_context
+      changed_when: false
+
+    - name: Show kubeconfig context
+      ansible.builtin.debug:
+        var: kubeconfig_context.stdout_lines
+
+    - name: Wait for amazon-cloudwatch namespace
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "{{ kubeconfig }}" get namespace "{{ cloudwatch_namespace }}"
+      args:
+        executable: /bin/bash
+      register: cloudwatch_ns
+      retries: 30
+      delay: 20
+      until: cloudwatch_ns.rc == 0
+      changed_when: false
+
+    - name: Wait for CloudWatch pods to appear
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "{{ kubeconfig }}" -n "{{ cloudwatch_namespace }}" get pods --no-headers | wc -l
+      args:
+        executable: /bin/bash
+      register: cloudwatch_pod_count
+      retries: 30
+      delay: 20
+      until: cloudwatch_pod_count.stdout | int > 0
+      changed_when: false
+
+    - name: Show CloudWatch pods
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "{{ kubeconfig }}" -n "{{ cloudwatch_namespace }}" get pods -o wide
+      args:
+        executable: /bin/bash
+      register: cloudwatch_pods
+      changed_when: false
+
+    - name: Print CloudWatch pods
+      ansible.builtin.debug:
+        var: cloudwatch_pods.stdout_lines
+
+    - name: Show CloudWatch daemonsets
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "{{ kubeconfig }}" -n "{{ cloudwatch_namespace }}" get daemonset
+      args:
+        executable: /bin/bash
+      register: cloudwatch_daemonsets
+      changed_when: false
+      failed_when: false
+
+    - name: Print CloudWatch daemonsets
+      ansible.builtin.debug:
+        var: cloudwatch_daemonsets.stdout_lines
+
+    - name: Show CloudWatch services
+      ansible.builtin.shell: |
+        kubectl --kubeconfig "{{ kubeconfig }}" -n "{{ cloudwatch_namespace }}" get svc
+      args:
+        executable: /bin/bash
+      register: cloudwatch_services
+      changed_when: false
+      failed_when: false
+
+    - name: Print CloudWatch services
+      ansible.builtin.debug:
+        var: cloudwatch_services.stdout_lines
+
+    - name: Show final message
+      ansible.builtin.debug:
+        msg:
+          - "CloudWatch Observability verification completed."
+          - "Open AWS Console -> CloudWatch -> Container Insights."
+          - "Open AWS Console -> CloudWatch -> Logs -> Log groups."
