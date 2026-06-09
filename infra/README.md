@@ -96,7 +96,7 @@ Jenkins runs in `us-west-2`, builds Docker images, and pushes them cross-region 
 
 ## Multi-Region Architecture Diagram
 
-![DigiPipeline Multi-Region Architecture](../images/multi-region-architecture.png)
+![DigiPipeline Multi-Region Architecture](../images/digipipeline_multi_region_architecture.png)
 ---
 
 ## Architecture Explanation
