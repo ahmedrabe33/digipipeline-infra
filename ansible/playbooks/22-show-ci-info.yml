@@ -69,5 +69,5 @@
           - "Jenkins Controller Private IP: {{ jenkins_controller_private_ip }}"
           - "Jenkins Agent Private IPs: {{ jenkins_agent_private_ips }}"
           - "Jenkins SSH Agent Username: jenkins"
-          - "Jenkins SSH Private Key on local machine: {{ bastion_key_path }}"
+          - "Jenkins SSH private Key on local machine: {{ bastion_key_path }}"
           - "Use this key inside Jenkins credentials as SSH Username with private key."
