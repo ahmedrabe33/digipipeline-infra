@@ -8,6 +8,8 @@
 
   vars:
     kubeconfig: "$HOME/.kube/config"
+    argocd_repo_username: "{{ lookup('env', 'DIGIPIPELINE_ARGOCD_REPO_USERNAME') | default('', true) }}"
+    argocd_repo_password: "{{ lookup('env', 'DIGIPIPELINE_ARGOCD_REPO_PASSWORD') | default('', true) }}"
 
   tasks:
     - name: Check required variables
@@ -59,6 +61,36 @@
         | kubectl --kubeconfig "{{ kubeconfig }}" apply -f -
       args:
         executable: /bin/bash
+
+    - name: Register private GitOps repository credentials in Argo CD when provided
+      ansible.builtin.shell: |
+        cat <<REPO_SECRET | kubectl --kubeconfig "{{ kubeconfig }}" apply -f -
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: "{{ argocd_app_name }}-gitops-repo"
+          namespace: "{{ argocd_namespace }}"
+          labels:
+            argocd.argoproj.io/secret-type: repository
+        stringData:
+          type: git
+          url: "{{ gitops_repo_url }}"
+          username: "{{ argocd_repo_username }}"
+          password: "{{ argocd_repo_password }}"
+        REPO_SECRET
+      args:
+        executable: /bin/bash
+      no_log: true
+      when:
+        - argocd_repo_username | length > 0
+        - argocd_repo_password | length > 0
+
+    - name: Use public GitOps repository when no Argo CD credentials are provided
+      ansible.builtin.debug:
+        msg: "No Argo CD repo credentials provided. Argo CD will use the GitOps repo as a public repository."
+      when:
+        - argocd_repo_username | length == 0
+        - argocd_repo_password | length == 0
 
     - name: Create Argo CD Application manifest
       ansible.builtin.copy:

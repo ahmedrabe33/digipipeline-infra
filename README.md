@@ -1,17 +1,28 @@
 # DigiPipeline Infrastructure
 
-> Fully automated DevOps infrastructure platform built with **Terraform**, **Ansible**, **AWS EKS**, **Jenkins**, **Argo CD**, **Karpenter**, **Amazon ECR**, **Prometheus**, **Grafana**, **SonarQube**, and **Trivy**.
+> Reusable production-style DevOps infrastructure platform built with **Terraform**, **Ansible**, **AWS EKS**, **Jenkins**, **Argo CD**, **Karpenter**, **Amazon ECR**, **Prometheus**, **Grafana**, **SonarQube**, and **Trivy**.
 
 ---
 
-
 ## Overview
 
-**DigiPipeline Infrastructure** is a production-style DevOps infrastructure repository designed to provision, configure, and operate a complete cloud-native delivery platform on AWS.
+**DigiPipeline Infrastructure** is a reusable DevOps infrastructure platform designed to provision, configure, and operate a complete cloud-native delivery platform on AWS.
 
-The main goal of this repository is automation.
+The main goal of this repository is automation and reusability.
 
-The platform is built so that anyone with the required tools, AWS credentials, and repository access can rebuild and operate the whole project easily using Ansible playbooks.
+DigiPipeline is not tied to one specific application.
+It can be reused with most cloud-native projects by changing only the application-specific configuration.
+
+For a new project, you mainly change:
+
+* Application repository
+* GitOps repository
+* Application namespace
+* Ingress name
+* ECR repository name
+* Application-specific variables and secrets
+
+The same infrastructure platform can then build, scan, push, deploy, monitor, and expose the new application.
 
 This repository automates:
 
@@ -26,32 +37,256 @@ This repository automates:
 * SonarQube and Trivy DevSecOps setup
 * Monitoring with Prometheus and Grafana
 * Application secrets creation
-* Database schema automation
+* Optional database schema automation
 * Local dashboard access tunnels
 * Application URL and credentials output
 
-The project is designed to minimize manual work.
 Most of the platform can be rebuilt, configured, and accessed using one master Ansible playbook.
+
+---
+
+## Reusable Platform Quick Start
+
+DigiPipeline is designed to be reused with different application projects.
+
+The user provides:
+
+```text
+1. Application repository
+2. GitOps repository
+3. Application-specific values in .env
+```
+
+Then the full platform can be built using one command.
+
+### 1. Clone the infrastructure repository
+
+```bash
+git clone https://github.com/ahmedrabe33/digipipeline-infra.git
+cd digipipeline-infra
+```
+
+### 2. Create your environment configuration
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Update the values for your own project:
+
+```bash
+DIGIPIPELINE_PROJECT_NAME=my-project
+DIGIPIPELINE_ENVIRONMENT_NAME=development
+
+DIGIPIPELINE_APP_NAME=myapp
+DIGIPIPELINE_APP_NAMESPACE=myapp-dev
+DIGIPIPELINE_APP_INGRESS_NAME=myapp-ingress
+DIGIPIPELINE_APP_SECRET_NAME=app-secrets
+
+DIGIPIPELINE_APP_REPO_URL=https://github.com/USERNAME/APP_REPO.git
+DIGIPIPELINE_GITOPS_REPO_URL=https://github.com/USERNAME/GITOPS_REPO.git
+DIGIPIPELINE_GITOPS_BRANCH=main
+DIGIPIPELINE_GITOPS_APP_PATH=k8s/overlays/development
+
+DIGIPIPELINE_ARGOCD_APP_NAME=my-project-development
+DIGIPIPELINE_JENKINS_JOB_NAME=my-project
+DIGIPIPELINE_ECR_REPOSITORY_NAME=myapp
+
+DIGIPIPELINE_ENABLE_DB_SCHEMA_AUTOMATION=false
+```
+
+### 3. Run the full platform from zero
+
+```bash
+set -a && source .env && set +a && cd ansible && ansible-playbook playbooks/99-run-all-digipipeline.yml --tags "infra,all"
+```
+
+This command loads the project configuration from `.env`, then builds and configures the full DigiPipeline platform.
+
+It automates:
+
+* Terraform infrastructure provisioning
+* Ansible inventory and variable generation
+* Bastion access configuration
+* Private EKS access configuration
+* Argo CD installation
+* AWS Load Balancer Controller installation
+* Karpenter installation
+* Prometheus and Grafana installation
+* Application secrets creation
+* GitOps application bootstrap
+* Optional database schema automation
+* Jenkins controller installation
+* Jenkins agent preparation and registration
+* Jenkins GitHub and ECR integration
+* SonarQube and Trivy installation
+* SonarQube token creation and Jenkins credential storage
+* Final URLs, usernames, and passwords output
+
+---
+
+## Required Repository Structure for Reuse
+
+DigiPipeline expects three repositories.
+
+| Repository Type     | Purpose                                                             |
+| ------------------- | ------------------------------------------------------------------- |
+| Infrastructure Repo | Terraform and Ansible automation for the platform                   |
+| Application Repo    | Application source code, Dockerfiles, and Jenkins pipeline          |
+| GitOps Repo         | Kubernetes manifests, Kustomize overlays, and Argo CD desired state |
+
+Example:
+
+```text
+Application code         -> your-app-repo
+Kubernetes desired state -> your-gitops-repo
+Infrastructure platform  -> digipipeline-infra
+```
+
+---
+
+## Application Repository Requirements
+
+Your application repository should contain the application source code and the CI/CD pipeline logic.
+
+Recommended structure:
+
+```text
+your-app-repo/
+|
+|-- Dockerfile
+|-- Jenkinsfile
+|-- src/
+|-- README.md
+```
+
+The Jenkins pipeline should be responsible for:
+
+```text
+Checkout application source code
+        |
+        v
+Run tests and validations
+        |
+        v
+Run SonarQube analysis
+        |
+        v
+Run Trivy scans
+        |
+        v
+Build Docker image
+        |
+        v
+Push image to Amazon ECR
+        |
+        v
+Update image tag in GitOps repository
+```
+
+---
+
+## GitOps Repository Requirements
+
+Your GitOps repository should contain Kubernetes manifests.
+
+Recommended structure:
+
+```text
+your-gitops-repo/
+|
+|-- k8s/
+    |
+    |-- overlays/
+        |
+        |-- development/
+            |
+            |-- kustomization.yaml
+            |-- deployment.yaml
+            |-- service.yaml
+            |-- ingress.yaml
+            |-- configmap.yaml
+```
+
+The GitOps path must match the value in `.env`:
+
+```bash
+DIGIPIPELINE_GITOPS_APP_PATH=k8s/overlays/development
+```
+
+The Kubernetes namespace and ingress name should match `.env`:
+
+```bash
+DIGIPIPELINE_APP_NAMESPACE=myapp-dev
+DIGIPIPELINE_APP_INGRESS_NAME=myapp-ingress
+```
+
+Example Ingress metadata:
+
+```yaml
+metadata:
+  name: myapp-ingress
+  namespace: myapp-dev
+```
+
+---
+
+## Public and Private GitOps Repositories
+
+Argo CD connects to the GitOps repository using the values from `.env`.
+
+These values are used by the Argo CD Application:
+
+```bash
+DIGIPIPELINE_GITOPS_REPO_URL=https://github.com/USERNAME/GITOPS_REPO.git
+DIGIPIPELINE_GITOPS_BRANCH=main
+DIGIPIPELINE_GITOPS_APP_PATH=k8s/overlays/development
+```
+
+Argo CD uses:
+
+```yaml
+repoURL: DIGIPIPELINE_GITOPS_REPO_URL
+targetRevision: DIGIPIPELINE_GITOPS_BRANCH
+path: DIGIPIPELINE_GITOPS_APP_PATH
+```
+
+### Public GitOps Repository
+
+If the GitOps repository is public, leave these values empty:
+
+```bash
+DIGIPIPELINE_ARGOCD_REPO_USERNAME=
+DIGIPIPELINE_ARGOCD_REPO_PASSWORD=
+```
+
+### Private GitOps Repository
+
+If the GitOps repository is private, set these values in `.env`:
+
+```bash
+DIGIPIPELINE_ARGOCD_REPO_USERNAME=YOUR_GITHUB_USERNAME
+DIGIPIPELINE_ARGOCD_REPO_PASSWORD=YOUR_GITHUB_PERSONAL_ACCESS_TOKEN
+```
+
+Ansible will automatically register the GitOps repository credentials inside Argo CD as a Kubernetes Secret.
+
+The credential task uses `no_log: true`, so the token does not appear in Ansible output.
+
+> Do not commit `.env` to GitHub.
 
 ---
 
 ## Project Repositories
 
-DigiPipeline is split into three repositories to follow a real production DevOps structure.
+DigiPipeline follows a real production-style separation of responsibilities.
 
-| Repository            | Responsibility                                                         |
-| --------------------- | ---------------------------------------------------------------------- |
-| `digipipeline-app`    | Application source code, Dockerfiles, and Jenkins pipeline             |
-| `digipipeline-gitops` | Kubernetes manifests, Kustomize overlays, and Argo CD desired state    |
-| `digipipeline-infra`  | AWS infrastructure and platform automation using Terraform and Ansible |
-
-Repository separation:
-
-```text
-Application code         -> digipipeline-app
-Kubernetes desired state -> digipipeline-gitops
-Infrastructure platform  -> digipipeline-infra
-```
+| Repository           | Responsibility                                                         |
+| -------------------- | ---------------------------------------------------------------------- |
+| `digipipeline-infra` | AWS infrastructure and platform automation using Terraform and Ansible |
+| `your-app-repo`      | Application source code, Dockerfiles, and Jenkins pipeline             |
+| `your-gitops-repo`   | Kubernetes manifests, Kustomize overlays, and Argo CD desired state    |
 
 ---
 
@@ -60,10 +295,16 @@ Infrastructure platform  -> digipipeline-infra
 This repository automates the full DevOps platform lifecycle:
 
 ```text
+Load project configuration from .env
+        |
+        v
 Prepare SSH keys
         |
         v
 Provision AWS infrastructure with Terraform
+        |
+        v
+Generate Ansible inventory and variables
         |
         v
 Configure Bastion access
@@ -93,7 +334,7 @@ Create application secrets
 Bootstrap GitOps application
         |
         v
-Apply database schema fixes
+Apply optional database schema fixes
         |
         v
 Install Jenkins controller
@@ -136,7 +377,7 @@ Show application URLs, dashboards, usernames, and passwords
               ------------------------------------------------
               |                      |                       |
               v                      v                       v
-      digipipeline-app       digipipeline-gitops      digipipeline-infra
+        App Repository        GitOps Repository       Infrastructure Repo
               |                      |                       |
               |                      |                       v
               |                      |              Terraform + Ansible
@@ -168,8 +409,8 @@ Show application URLs, dashboards, usernames, and passwords
                   --------------------------------------------
                   |                    |                     |
                   v                    v                     v
-           AuraWeb Workloads     Monitoring Stack      Platform Tools
-           Microservices         Prometheus/Grafana    Argo CD/Karpenter
+        Application Workloads   Monitoring Stack      Platform Tools
+        Microservices           Prometheus/Grafana    Argo CD/Karpenter
                   |
                   v
         AWS Load Balancer Controller
@@ -184,7 +425,7 @@ Show application URLs, dashboards, usernames, and passwords
 
 ### Application Running Through AWS ALB
 
-The AuraWeb application is exposed publicly using an AWS Application Load Balancer created by the AWS Load Balancer Controller.
+The application is exposed publicly using an AWS Application Load Balancer created by the AWS Load Balancer Controller.
 
 ![Application ALB](images/app-alb.png)
 
@@ -341,7 +582,7 @@ All project operations are intended to be triggered from the local control machi
 | Karpenter                    | Kubernetes node autoscaling and cost optimization        |
 | AWS Load Balancer Controller | Creates AWS ALB from Kubernetes Ingress                  |
 | Amazon EBS CSI Driver        | Enables persistent Kubernetes storage                    |
-| PostgreSQL                   | Application database                                     |
+| PostgreSQL                   | Optional application database                            |
 | Prometheus                   | Metrics collection                                       |
 | Grafana                      | Metrics visualization                                    |
 | SonarQube                    | Code quality analysis                                    |
@@ -366,7 +607,7 @@ digipipeline-infra/
 |   |       |
 |   |       |-- group_vars/
 |   |           |
-|   |           |-- all.yml
+|   |           |-- all.yml.example
 |   |
 |   |-- playbooks/
 |   |   |
@@ -429,17 +670,13 @@ digipipeline-infra/
 |       |-- README.md
 |
 |-- images/
-|   |
-|   |-- app-alb.png
-|   |-- argo-healthy.png
-|   |-- ecr.png
-|   |-- grafana-dashboard.png
-|   |-- jenkins-success.png
-|   |-- node-exporter.png
 |
+|-- .env.example
 |-- .gitignore
 |-- README.md
 ```
+
+> `ansible/inventories/dev/group_vars/all.yml` is generated automatically by the rebuild automation and should not be committed.
 
 ---
 
@@ -495,7 +732,7 @@ Ansible automates:
 * Prometheus and Grafana installation
 * Application secrets creation
 * GitOps application bootstrap
-* Database schema fixes
+* Optional database schema fixes
 * Jenkins controller installation
 * Jenkins agent preparation
 * Jenkins GitHub plugin setup
@@ -515,149 +752,52 @@ ansible/README.md
 
 ---
 
-## Jenkins Automation
+## Configuration Using `.env`
 
-Jenkins is configured through Ansible automation.
+The main user-facing configuration file is `.env`.
 
-The project does not require manually adding Jenkins agents after every rebuild.
-
-Ansible handles:
-
-* Jenkins controller installation
-* Jenkins agent machine preparation
-* Required packages installation on agents
-* SSH access between Jenkins controller and agents
-* Jenkins node registration
-* Jenkins agent labels
-* Docker build environment preparation
-* Jenkins GitHub plugins
-* Jenkins access to Amazon ECR
-
-Main playbooks:
+Start from the example:
 
 ```bash
-ansible-playbook playbooks/20-install-jenkins-controller.yml
-ansible-playbook playbooks/21-prepare-jenkins-agents.yml
-ansible-playbook playbooks/32-configure-jenkins-agents.yml
-ansible-playbook playbooks/32-configure-jenkins-ecr-iam.yml
+cp .env.example .env
+nano .env
 ```
 
-This means Jenkins agents are not added manually from the Jenkins UI.
-They are prepared and attached automatically by Ansible.
+Important variables:
 
----
-
-## SonarQube and Jenkins Integration
-
-SonarQube integration is also automated.
-
-Ansible handles:
-
-* Installing SonarQube
-* Opening SonarQube access
-* Installing Jenkins SonarQube plugin
-* Creating or retrieving a SonarQube token
-* Storing the SonarQube token inside Jenkins credentials
-* Configuring Jenkins to use SonarQube in the pipeline
-
-Main playbooks:
-
-```bash
-ansible-playbook playbooks/24-install-sonarqube.yml
-ansible-playbook playbooks/28-install-jenkins-sonarqube-plugin.yml
-ansible-playbook playbooks/27-setup-sonarqube-for-jenkins.yml
-```
-
-The Jenkins pipeline then uses the stored SonarQube credential during the `SonarQube Scan` stage.
-
-This makes the DevSecOps setup reproducible after every rebuild.
-
----
-
-## CI/CD and GitOps Flow
-
-DigiPipeline separates CI and CD responsibilities.
-
-### CI Responsibility
-
-Jenkins is responsible for:
-
-* Checking out source code from `digipipeline-app`
-* Installing dependencies
-* Running tests and validations
-* Running SonarQube analysis
-* Running Trivy scans
-* Building Docker images
-* Pushing Docker images to Amazon ECR in `us-east-1`
-* Updating image tags in `digipipeline-gitops`
-
----
-
-### CD Responsibility
-
-Argo CD is responsible for:
-
-* Watching `digipipeline-gitops`
-* Detecting Kubernetes manifest changes
-* Syncing application resources to EKS
-* Maintaining desired state
-* Showing sync and health status
-
----
-
-### Full Delivery Flow
-
-```text
-Developer pushes code
-        |
-        v
-digipipeline-app
-        |
-        v
-Jenkins pipeline starts
-        |
-        v
-Build and test application
-        |
-        v
-Run SonarQube and Trivy checks
-        |
-        v
-Build Docker images
-        |
-        v
-Push images to Amazon ECR
-        |
-        v
-Update image tags in digipipeline-gitops
-        |
-        v
-Argo CD detects GitOps change
-        |
-        v
-Argo CD syncs application to EKS
-        |
-        v
-AWS Load Balancer Controller exposes application through ALB
-```
+| Variable                                   | Purpose                                           |
+| ------------------------------------------ | ------------------------------------------------- |
+| `DIGIPIPELINE_PROJECT_NAME`                | Logical project name                              |
+| `DIGIPIPELINE_ENVIRONMENT_NAME`            | Environment name, such as development             |
+| `DIGIPIPELINE_APP_NAME`                    | Application name                                  |
+| `DIGIPIPELINE_APP_NAMESPACE`               | Kubernetes namespace for the app                  |
+| `DIGIPIPELINE_APP_INGRESS_NAME`            | Kubernetes ingress name                           |
+| `DIGIPIPELINE_APP_REPO_URL`                | Application source code repository                |
+| `DIGIPIPELINE_GITOPS_REPO_URL`             | GitOps repository with Kubernetes manifests       |
+| `DIGIPIPELINE_GITOPS_APP_PATH`             | Path inside GitOps repo watched by Argo CD        |
+| `DIGIPIPELINE_ARGOCD_APP_NAME`             | Argo CD Application name                          |
+| `DIGIPIPELINE_JENKINS_JOB_NAME`            | Jenkins job name                                  |
+| `DIGIPIPELINE_ECR_REPOSITORY_NAME`         | ECR repository used for application images        |
+| `DIGIPIPELINE_ENABLE_DB_SCHEMA_AUTOMATION` | Enables or disables built-in DB schema automation |
+| `DIGIPIPELINE_ARGOCD_REPO_USERNAME`        | Optional username for private GitOps repo         |
+| `DIGIPIPELINE_ARGOCD_REPO_PASSWORD`        | Optional token/password for private GitOps repo   |
 
 ---
 
 ## One-Command Platform Deployment
 
-DigiPipeline is designed to be easy to rebuild and operate.
-
-The whole infrastructure and platform can be installed using one master Ansible playbook:
+After editing `.env`, run:
 
 ```bash
-cd ~/digipipeline-workspace/digipipeline-infra/ansible
-
-ansible-playbook playbooks/99-run-all-digipipeline.yml --tags "infra,all"
+set -a && source .env && set +a && cd ansible && ansible-playbook playbooks/99-run-all-digipipeline.yml --tags "infra,all"
 ```
 
 This command performs the complete setup flow:
 
 ```text
+Load .env configuration
+        |
+        v
 Prepare SSH keys
         |
         v
@@ -694,7 +834,7 @@ Create application secrets
 Bootstrap GitOps application
         |
         v
-Apply database schema automation
+Apply optional database schema automation
         |
         v
 Install Jenkins CI
@@ -722,12 +862,10 @@ Print access information
 If the AWS infrastructure already exists and only the platform needs to be reconfigured or repaired, run:
 
 ```bash
-cd ~/digipipeline-workspace/digipipeline-infra/ansible
-
-ansible-playbook playbooks/99-run-all-digipipeline.yml
+set -a && source .env && set +a && cd ansible && ansible-playbook playbooks/99-run-all-digipipeline.yml
 ```
 
-This is useful when you want to re-run the automation without recreating Terraform infrastructure.
+This is useful when you want to re-run automation without recreating Terraform infrastructure.
 
 ---
 
@@ -736,14 +874,14 @@ This is useful when you want to re-run the automation without recreating Terrafo
 After the platform is installed, local dashboard access can be opened with:
 
 ```bash
-cd ~/digipipeline-workspace/digipipeline-infra/ansible
-
+cd ansible
 ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
 ```
 
 Or directly:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/open-all-access.yml
 ```
 
@@ -777,7 +915,7 @@ ansible-playbook playbooks/open-all-access.yml
 To print the application URL and platform credentials, run:
 
 ```bash
-cd ~/digipipeline-workspace/digipipeline-infra/ansible
+cd ansible
 
 ansible-playbook playbooks/12-show-access-info.yml
 ansible-playbook playbooks/22-show-ci-info.yml
@@ -805,28 +943,76 @@ Typical development access values:
 | Grafana   | `admin`  | `admin123`                           |
 | SonarQube | `admin`  | `Admin@12345`                        |
 
-> These are development/demo credentials. Do not commit real production passwords, tokens, private keys, or kubeconfig files to Git.
+> These are development/demo credentials. Do not commit real production passwords, tokens, private keys, kubeconfig files, Terraform state files, or real `.tfvars` files to Git.
 
 ---
 
-## Get the Public Application URL
+## CI/CD and GitOps Flow
 
-The AuraWeb application is exposed through an AWS Application Load Balancer.
+DigiPipeline separates CI and CD responsibilities.
 
-To get the public application URL:
+### CI Responsibility
 
-```bash
-cd ~/digipipeline-workspace/digipipeline-infra/ansible
+Jenkins is responsible for:
 
-ALB=$(ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get ingress auraweb-ingress \
--o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
-' | tail -1)
+* Checking out source code from the application repository
+* Installing dependencies
+* Running tests and validations
+* Running SonarQube analysis
+* Running Trivy scans
+* Building Docker images
+* Pushing Docker images to Amazon ECR in `us-east-1`
+* Updating image tags in the GitOps repository
 
-echo "http://$ALB"
+---
+
+### CD Responsibility
+
+Argo CD is responsible for:
+
+* Watching the GitOps repository
+* Detecting Kubernetes manifest changes
+* Syncing application resources to EKS
+* Maintaining desired state
+* Showing sync and health status
+
+---
+
+### Full Delivery Flow
+
+```text
+Developer pushes code
+        |
+        v
+Application repository
+        |
+        v
+Jenkins pipeline starts
+        |
+        v
+Build and test application
+        |
+        v
+Run SonarQube and Trivy checks
+        |
+        v
+Build Docker image
+        |
+        v
+Push image to Amazon ECR
+        |
+        v
+Update image tag in GitOps repository
+        |
+        v
+Argo CD detects GitOps change
+        |
+        v
+Argo CD syncs application to EKS
+        |
+        v
+AWS Load Balancer Controller exposes application through ALB
 ```
-
-Open the printed URL in the browser.
 
 ---
 
@@ -834,10 +1020,10 @@ Open the printed URL in the browser.
 
 After a fresh rebuild, Amazon ECR may be empty.
 
-In that case, open Jenkins and run the application pipeline:
+Open Jenkins and run the application pipeline:
 
 ```text
-Jenkins -> digipipeline job -> Build Now
+Jenkins -> your job name -> Build Now
 ```
 
 The Jenkins pipeline will:
@@ -852,13 +1038,13 @@ Run SonarQube analysis
 Run Trivy scans
         |
         v
-Build Docker images
+Build Docker image
         |
         v
-Push images to Amazon ECR
+Push image to Amazon ECR
         |
         v
-Update image tags in digipipeline-gitops
+Update image tag in GitOps repository
         |
         v
 Argo CD syncs the application to EKS
@@ -867,55 +1053,22 @@ Argo CD syncs the application to EKS
 After the Jenkins build finishes, verify the deployment:
 
 ```bash
-cd ~/digipipeline-workspace/digipipeline-infra/ansible
+cd ansible
 
 ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n argocd get application digipipeline-development
+kubectl --kubeconfig "$HOME/.kube/config" -n argocd get application
 '
 
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pods
-'
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get pods
+"
 ```
 
 Expected result:
 
 ```text
 Argo CD: Synced / Healthy
-Pods: 1/1 Running
-```
-
----
-
-## Quick Start Summary
-
-For a complete rebuild from scratch:
-
-```bash
-cd ~/digipipeline-workspace/digipipeline-infra/ansible
-
-ansible-playbook playbooks/99-run-all-digipipeline.yml --tags "infra,all"
-ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
-ansible-playbook playbooks/12-show-access-info.yml
-ansible-playbook playbooks/22-show-ci-info.yml
-```
-
-Then run the Jenkins pipeline:
-
-```text
-http://localhost:8082
-Jenkins -> digipipeline -> Build Now
-```
-
-Finally, get the application URL:
-
-```bash
-ALB=$(ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get ingress auraweb-ingress \
--o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
-' | tail -1)
-
-echo "http://$ALB"
+Pods: Running
 ```
 
 ---
@@ -927,13 +1080,14 @@ Application secrets are created using Ansible before GitOps workloads are deploy
 The secrets playbook is:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/13-create-app-secrets.yml
 ```
 
-It creates and updates the Kubernetes secret:
+It creates and updates the Kubernetes secret defined by:
 
-```text
-auraweb-dev/app-secrets
+```bash
+DIGIPIPELINE_APP_SECRET_NAME=app-secrets
 ```
 
 The secret includes keys such as:
@@ -964,30 +1118,31 @@ This prevents workloads from failing with missing secret keys after a fresh rebu
 
 ## Database Schema Automation
 
-PostgreSQL runs as a StatefulSet and uses a PersistentVolumeClaim.
+Database schema automation is optional.
 
-Some schema adjustments are automated after the GitOps application is deployed because the `postgres-0` pod must exist first.
+It can be enabled or disabled from `.env`:
+
+```bash
+DIGIPIPELINE_ENABLE_DB_SCHEMA_AUTOMATION=false
+```
+
+Use `false` when the new application has its own schema management, migrations, or a different database structure.
+
+Use `true` only when the application is compatible with the provided PostgreSQL schema automation.
 
 The database schema playbook is:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/14-apply-db-schema.yml
 ```
 
-This playbook is used to make the development database compatible with the current application code.
-
-Example schema tasks:
+Example schema tasks when enabled:
 
 * Ensure the `users` table exists
 * Ensure `password_hash` exists
 * Verify `users` table structure
 * Apply compatibility fixes for authentication services
-
-This playbook should run after:
-
-```text
-11-bootstrap-gitops-app.yml
-```
 
 ---
 
@@ -995,7 +1150,7 @@ This playbook should run after:
 
 DigiPipeline supports persistent Kubernetes workloads using Amazon EBS volumes.
 
-PostgreSQL uses:
+PostgreSQL can use:
 
 * StatefulSet
 * PersistentVolumeClaim
@@ -1005,6 +1160,7 @@ PostgreSQL uses:
 The StorageClass configuration is automated using Ansible:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/04-configure-default-storageclass.yml
 ```
 
@@ -1053,14 +1209,51 @@ The project includes DevSecOps automation using:
 The main DevSecOps automation playbook is:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/31-install-devsecops.yml
 ```
 
 SonarQube integration with Jenkins is automated using:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/27-setup-sonarqube-for-jenkins.yml
 ```
+
+This playbook creates or retrieves a SonarQube token and stores it inside Jenkins credentials automatically.
+
+---
+
+## Jenkins Automation
+
+Jenkins is configured through Ansible automation.
+
+The project does not require manually adding Jenkins agents after every rebuild.
+
+Ansible handles:
+
+* Jenkins controller installation
+* Jenkins agent machine preparation
+* Required packages installation on agents
+* SSH access between Jenkins controller and agents
+* Jenkins node registration
+* Jenkins agent labels
+* Docker build environment preparation
+* Jenkins GitHub plugins
+* Jenkins access to Amazon ECR
+
+Main playbooks:
+
+```bash
+cd ansible
+
+ansible-playbook playbooks/20-install-jenkins-controller.yml
+ansible-playbook playbooks/21-prepare-jenkins-agents.yml
+ansible-playbook playbooks/32-configure-jenkins-agents.yml
+ansible-playbook playbooks/32-configure-jenkins-ecr-iam.yml
+```
+
+This means Jenkins agents are prepared and attached automatically by Ansible.
 
 ---
 
@@ -1108,6 +1301,14 @@ Backend components:
 | Amazon S3 | Stores Terraform state           |
 | DynamoDB  | Provides Terraform state locking |
 
+Before running the platform, update:
+
+```text
+infra/terraform/backend.tf
+```
+
+with your own backend resources.
+
 Example backend configuration:
 
 ```hcl
@@ -1123,6 +1324,8 @@ terraform {
 }
 ```
 
+> The S3 bucket and DynamoDB table must exist before running `terraform init`.
+
 Do not delete the backend S3 bucket or DynamoDB lock table unless you intentionally want to remove Terraform state management.
 
 ---
@@ -1132,6 +1335,8 @@ Do not delete the backend S3 bucket or DynamoDB lock table unless you intentiona
 ### Check EKS Nodes
 
 ```bash
+cd ansible
+
 ansible bastion -m shell -a '
 kubectl --kubeconfig "$HOME/.kube/config" get nodes -o wide
 '
@@ -1142,6 +1347,8 @@ kubectl --kubeconfig "$HOME/.kube/config" get nodes -o wide
 ### Check All Pods
 
 ```bash
+cd ansible
+
 ansible bastion -m shell -a '
 kubectl --kubeconfig "$HOME/.kube/config" get pods -A
 '
@@ -1152,9 +1359,11 @@ kubectl --kubeconfig "$HOME/.kube/config" get pods -A
 ### Check Application Pods
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pods
-'
+cd ansible
+
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get pods
+"
 ```
 
 ---
@@ -1162,9 +1371,11 @@ kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pods
 ### Check Services and Ingress
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get svc,ingress
-'
+cd ansible
+
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get svc,ingress
+"
 ```
 
 ---
@@ -1172,10 +1383,18 @@ kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get svc,ingress
 ### Get Application URL
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get ingress auraweb-ingress \
--o jsonpath="{.status.loadBalancer.ingress[0].hostname}{\"\n\"}"
-'
+cd ansible
+
+ansible-playbook playbooks/12-show-access-info.yml
+```
+
+Or directly:
+
+```bash
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get ingress $DIGIPIPELINE_APP_INGRESS_NAME \
+-o jsonpath='{.status.loadBalancer.ingress[0].hostname}{\"\n\"}'
+"
 ```
 
 ---
@@ -1183,9 +1402,11 @@ kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get ingress auraweb-ing
 ### Check Persistent Volume Claims
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pvc
-'
+cd ansible
+
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get pvc
+"
 ```
 
 ---
@@ -1193,20 +1414,31 @@ kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pvc
 ### Check Current Deployed Image
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get deployment frontend \
--o jsonpath="{.spec.template.spec.containers[0].image}{\"\n\"}"
-'
+cd ansible
+
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get deployments -o wide
+"
 ```
 
 ---
 
-### Check Backend Logs
+### Check Application Logs
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev logs deployment/user-auth --tail=150
-'
+cd ansible
+
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get pods
+"
+```
+
+Then check logs for the required deployment or pod:
+
+```bash
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE logs deployment/YOUR_DEPLOYMENT_NAME --tail=150
+"
 ```
 
 ---
@@ -1267,9 +1499,11 @@ done
 Check PVC status:
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev get pvc
-'
+cd ansible
+
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE get pvc
+"
 ```
 
 Check StorageClass:
@@ -1299,28 +1533,36 @@ secret "app-secrets" not found
 Run:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/13-create-app-secrets.yml
 ```
 
 Then restart affected pods:
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n auraweb-dev rollout restart deployment
-'
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n $DIGIPIPELINE_APP_NAMESPACE rollout restart deployment
+"
 ```
 
 ---
 
 ### Database Schema Mismatch
 
-If backend logs show database schema errors, run:
+If backend logs show database schema errors and your app supports the provided schema automation, enable it in `.env`:
 
 ```bash
+DIGIPIPELINE_ENABLE_DB_SCHEMA_AUTOMATION=true
+```
+
+Then run:
+
+```bash
+cd ansible
 ansible-playbook playbooks/14-apply-db-schema.yml
 ```
 
-Then retry the application request.
+If your app has its own migrations, keep this disabled and run your own migration process.
 
 ---
 
@@ -1329,10 +1571,12 @@ Then retry the application request.
 Check Argo CD resources:
 
 ```bash
-ansible bastion -m shell -a '
-kubectl --kubeconfig "$HOME/.kube/config" -n argocd get application digipipeline-development \
--o jsonpath="{range .status.resources[*]}{.kind}{\"\t\"}{.namespace}{\"\t\"}{.name}{\"\t\"}{.status}{\"\t\"}{.health.status}{\"\n\"}{end}"
-'
+cd ansible
+
+ansible bastion -m shell -a "
+kubectl --kubeconfig \"\$HOME/.kube/config\" -n argocd get application $DIGIPIPELINE_ARGOCD_APP_NAME \
+-o jsonpath='{range .status.resources[*]}{.kind}{\"\t\"}{.namespace}{\"\t\"}{.name}{\"\t\"}{.status}{\"\t\"}{.health.status}{\"\n\"}{end}'
+"
 ```
 
 Common causes:
@@ -1347,6 +1591,7 @@ Common causes:
 * Empty ECR repository after rebuild
 * Kustomize patch error
 * StatefulSet immutable field change
+* Private GitOps repository credentials are missing
 
 ---
 
@@ -1355,6 +1600,7 @@ Common causes:
 Open access tunnels:
 
 ```bash
+cd ansible
 ansible-playbook playbooks/99-run-all-digipipeline.yml --tags access
 ```
 
@@ -1362,9 +1608,14 @@ If local ports are busy:
 
 ```bash
 pkill -f "ssh -f -N" || true
+pkill -f "kubectl.*port-forward" || true
 ```
 
-Then run the access command again.
+Then run:
+
+```bash
+ansible-playbook playbooks/open-all-access.yml
+```
 
 ---
 
@@ -1389,12 +1640,14 @@ Recommended production improvements:
 
 Do not commit:
 
+* `.env`
 * Real passwords
 * Tokens
 * Private keys
 * kubeconfig files
 * Terraform state files
 * Sensitive `.tfvars` files
+* Generated `ansible/inventories/dev/group_vars/all.yml`
 
 ---
 
@@ -1402,6 +1655,7 @@ Do not commit:
 
 This project demonstrates practical DevOps and Cloud Engineering skills:
 
+* Reusable DevOps platform design
 * Infrastructure as Code with Terraform
 * Configuration automation with Ansible
 * AWS multi-region infrastructure design
@@ -1446,22 +1700,26 @@ This project demonstrates practical DevOps and Cloud Engineering skills:
 
 ## Project Status
 
-| Area                           | Status      |
-| ------------------------------ | ----------- |
-| Infrastructure automation      | Implemented |
-| EKS provisioning               | Implemented |
-| Bastion access                 | Implemented |
-| Jenkins controller setup       | Implemented |
-| Jenkins agents setup           | Implemented |
-| ECR integration                | Implemented |
-| Argo CD setup                  | Implemented |
-| GitOps app bootstrap           | Implemented |
-| Application secrets automation | Implemented |
-| Database schema automation     | Implemented |
-| Monitoring setup               | Implemented |
-| Persistent storage automation  | Implemented |
-| DevSecOps tooling              | Implemented |
-| Access automation              | Implemented |
+| Area                                | Status      |
+| ----------------------------------- | ----------- |
+| Reusable project configuration      | Implemented |
+| One-command platform deployment     | Implemented |
+| Infrastructure automation           | Implemented |
+| EKS provisioning                    | Implemented |
+| Bastion access                      | Implemented |
+| Jenkins controller setup            | Implemented |
+| Jenkins agents setup                | Implemented |
+| ECR integration                     | Implemented |
+| Argo CD setup                       | Implemented |
+| Public GitOps repository support    | Implemented |
+| Private GitOps repository support   | Implemented |
+| GitOps app bootstrap                | Implemented |
+| Application secrets automation      | Implemented |
+| Optional database schema automation | Implemented |
+| Monitoring setup                    | Implemented |
+| Persistent storage automation       | Implemented |
+| DevSecOps tooling                   | Implemented |
+| Access automation                   | Implemented |
 
 ---
 
