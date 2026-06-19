@@ -21,8 +21,8 @@
     sonar_token_name: jenkins
     sonar_jenkins_credential_id: sonarqube-token
 
-    sonar_project_key: auraweb
-    sonar_project_name: "AuraWeb Platform"
+    sonar_project_key:  "{{ sonar_project_key | default(app_name | default('auraweb')) }}"
+    sonar_project_name: "{{ sonar_project_name | default(app_name | default('auraweb')) }}"
 
     sonar_server_name: sonarqube
 

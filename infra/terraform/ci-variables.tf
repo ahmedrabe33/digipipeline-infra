@@ -7,7 +7,7 @@ variable "environment" {
 variable "ecr_repository_names" {
   description = "ECR repositories for application images"
   type        = list(string)
-  default     = ["digipipeline-app"]
+  default     = ["your-app-image-repo"]
 }
 
 variable "jenkins_controller_instance_type" {

@@ -17,6 +17,35 @@
     key_path: "{{ lookup('env', 'DIGIPIPELINE_KEY_PATH') | default(lookup('env', 'HOME') ~ '/.ssh/' ~ key_name ~ '.pem', true) }}"
     public_key_path: "{{ lookup('env', 'DIGIPIPELINE_PUBLIC_KEY_PATH') | default(key_path ~ '.pub', true) }}"
 
+    # Reusable project settings
+    project_name: "{{ lookup('env', 'DIGIPIPELINE_PROJECT_NAME') | default('digipipeline', true) }}"
+    environment_name: "{{ lookup('env', 'DIGIPIPELINE_ENVIRONMENT_NAME') | default('development', true) }}"
+    app_name: "{{ lookup('env', 'DIGIPIPELINE_APP_NAME') | default('auraweb', true) }}"
+    app_namespace: "{{ lookup('env', 'DIGIPIPELINE_APP_NAMESPACE') | default(app_name ~ '-dev', true) }}"
+    app_ingress_name: "{{ lookup('env', 'DIGIPIPELINE_APP_INGRESS_NAME') | default(app_name ~ '-ingress', true) }}"
+    app_secret_name: "{{ lookup('env', 'DIGIPIPELINE_APP_SECRET_NAME') | default('app-secrets', true) }}"
+
+    app_repo_url: "{{ lookup('env', 'DIGIPIPELINE_APP_REPO_URL') | default('https://github.com/ahmedrabe33/digipipeline-app.git', true) }}"
+    gitops_repo_url: "{{ lookup('env', 'DIGIPIPELINE_GITOPS_REPO_URL') | default('https://github.com/ahmedrabe33/digipipeline-gitops.git', true) }}"
+    gitops_branch: "{{ lookup('env', 'DIGIPIPELINE_GITOPS_BRANCH') | default('main', true) }}"
+    gitops_app_path: "{{ lookup('env', 'DIGIPIPELINE_GITOPS_APP_PATH') | default('k8s/overlays/development', true) }}"
+
+    argocd_app_name: "{{ lookup('env', 'DIGIPIPELINE_ARGOCD_APP_NAME') | default(project_name ~ '-' ~ environment_name, true) }}"
+    argocd_project: "{{ lookup('env', 'DIGIPIPELINE_ARGOCD_PROJECT') | default('default', true) }}"
+
+    jenkins_job_name: "{{ lookup('env', 'DIGIPIPELINE_JENKINS_JOB_NAME') | default(project_name, true) }}"
+    github_credentials_id: "{{ lookup('env', 'DIGIPIPELINE_GITHUB_CREDENTIALS_ID') | default('github-pat-creds', true) }}"
+
+    ecr_repository_name: "{{ lookup('env', 'DIGIPIPELINE_ECR_REPOSITORY_NAME') | default('digipipeline-app', true) }}"
+
+    sonar_project_key: "{{ lookup('env', 'DIGIPIPELINE_SONAR_PROJECT_KEY') | default(app_name, true) }}"
+    sonar_project_name: "{{ lookup('env', 'DIGIPIPELINE_SONAR_PROJECT_NAME') | default(app_name ~ ' Platform', true) }}"
+
+    enable_db_schema_automation: "{{ lookup('env', 'DIGIPIPELINE_ENABLE_DB_SCHEMA_AUTOMATION') | default('true', true) }}"
+    postgres_db: "{{ lookup('env', 'DIGIPIPELINE_POSTGRES_DB') | default(app_name, true) }}"
+    postgres_user: "{{ lookup('env', 'DIGIPIPELINE_POSTGRES_USER') | default(app_name, true) }}"
+    postgres_password: "{{ lookup('env', 'DIGIPIPELINE_POSTGRES_PASSWORD') | default(app_name ~ '_password', true) }}"
+
   tasks:
     - name: Check local SSH private key exists
       ansible.builtin.stat:
@@ -118,6 +147,15 @@
         regexp: '^public_key_path\s*='
         line: 'public_key_path = "{{ public_key_path }}"'
 
+    - name: Update ECR repository names in terraform.tfvars
+      ansible.builtin.replace:
+        path: "{{ terraform_dir }}/terraform.tfvars"
+        regexp: '(?ms)^ecr_repository_names\s*=\s*\[.*?\]'
+        replace: |-
+          ecr_repository_names = [
+            "{{ ecr_repository_name }}"
+          ]
+
     - name: Terraform init
       ansible.builtin.command: terraform init -reconfigure
       args:
@@ -185,10 +223,62 @@
           jenkins-agent-{{ loop.index }} ansible_host={{ ip }} ansible_user=ec2-user ansible_ssh_private_key_file={{ key_path }} ansible_ssh_common_args='-o ProxyJump=ec2-user@{{ tf.jenkins_controller_public_ip.value }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
           {% endfor %}
 
-    - name: Update Ansible all.yml with new Terraform outputs
+    - name: Update Ansible all.yml with new Terraform outputs and reusable settings
       ansible.builtin.copy:
         dest: "{{ ansible_dir }}/inventories/dev/group_vars/all.yml"
         content: |
+          # ==================================================
+          # Reusable Project Settings
+          # Change this section when using another application
+          # ==================================================
+
+          project_name: "{{ project_name }}"
+          environment_name: "{{ environment_name }}"
+
+          app_name: "{{ app_name }}"
+          app_namespace: "{{ app_namespace }}"
+          app_ingress_name: "{{ app_ingress_name }}"
+          app_secret_name: "{{ app_secret_name }}"
+
+          app_repo_url: "{{ app_repo_url }}"
+          gitops_repo_url: "{{ gitops_repo_url }}"
+          gitops_branch: "{{ gitops_branch }}"
+          gitops_app_path: "{{ gitops_app_path }}"
+
+          argocd_namespace: "argocd"
+          argocd_project: "{{ argocd_project }}"
+          argocd_app_name: "{{ argocd_app_name }}"
+
+          jenkins_job_name: "{{ jenkins_job_name }}"
+          github_credentials_id: "{{ github_credentials_id }}"
+
+          sonar_project_key: "{{ sonar_project_key }}"
+          sonar_project_name: "{{ sonar_project_name }}"
+          sonar_jenkins_credential_id: "sonarqube-token"
+
+          enable_db_schema_automation: {{ enable_db_schema_automation | bool }}
+          postgres_pod: "postgres-0"
+          postgres_db: "{{ postgres_db }}"
+          postgres_user: "{{ postgres_user }}"
+          postgres_password: "{{ postgres_password }}"
+
+          jwt_secret: "dev-jwt-secret-123456"
+
+          redis_host: "redis"
+          redis_port: "6379"
+          redis_url: "redis://redis:6379"
+
+          rabbitmq_host: "rabbitmq"
+          rabbitmq_port: "5672"
+          rabbitmq_user: "guest"
+          rabbitmq_password: "guest"
+          rabbitmq_url: "amqp://guest:guest@rabbitmq:5672"
+
+          # ==================================================
+          # AWS / Terraform Generated Values
+          # These values are generated/updated by automation
+          # ==================================================
+
           aws_profile: "{{ aws_profile }}"
           aws_region: "{{ aws_region }}"
           jenkins_aws_region: "{{ jenkins_aws_region }}"
@@ -201,8 +291,8 @@
           bastion_private_ip: "{{ tf.bastion_private_ip.value }}"
           bastion_key_path: "{{ key_path }}"
 
-          ecr_repository_name: "digipipeline-app"
-          ecr_repository_url: "{{ tf.ecr_repository_urls.value['digipipeline-app'] }}"
+          ecr_repository_name: "{{ ecr_repository_name }}"
+          ecr_repository_url: "{{ tf.ecr_repository_urls.value[ecr_repository_name] }}"
 
           jenkins_url: "{{ tf.jenkins_url.value }}"
           jenkins_controller_public_ip: "{{ tf.jenkins_controller_public_ip.value }}"
@@ -323,4 +413,7 @@
         msg:
           - "Infrastructure is ready."
           - "Bastion IP: {{ tf.bastion_public_ip.value }}"
+          - "App repo: {{ app_repo_url }}"
+          - "GitOps repo: {{ gitops_repo_url }}"
+          - "ECR repository: {{ ecr_repository_name }}"
           - "Next: cd {{ ansible_dir }} && ansible-playbook playbooks/10-install-platform.yml"

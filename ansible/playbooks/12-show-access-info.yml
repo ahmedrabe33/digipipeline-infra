@@ -1,5 +1,5 @@
 ---
-- name: Show Digipipeline access information
+- name: Show application and platform access information
   hosts: bastion
   gather_facts: false
 
@@ -7,61 +7,21 @@
     - ../inventories/dev/group_vars/all.yml
 
   vars:
-    app_namespace: demo-app
-    app_ingress_name: demo-app-ingress
-    argocd_namespace: argocd
-    monitoring_namespace: monitoring
-    grafana_secret_name: kube-prometheus-stack-grafana
+    kubeconfig: "$HOME/.kube/config"
 
   tasks:
     - name: Check required variables
       ansible.builtin.assert:
         that:
-          - aws_region is defined
-          - cluster_name is defined
-          - bastion_public_ip is defined
-          - bastion_key_path is defined
-        fail_msg: "Missing required variables. Run 00-rebuild-infra.yml first."
+          - app_namespace is defined
+          - app_ingress_name is defined
+          - argocd_namespace is defined
+          - argocd_app_name is defined
+        fail_msg: "Missing access variables. Check inventories/dev/group_vars/all.yml."
 
-    - name: Check required tools on Bastion
+    - name: Get application Load Balancer hostname
       ansible.builtin.shell: |
-        set -e
-        command -v aws
-        command -v kubectl
-      args:
-        executable: /bin/bash
-      changed_when: false
-
-    - name: Update kubeconfig on Bastion
-      ansible.builtin.shell: |
-        set -e
-
-        mkdir -p "$HOME/.kube"
-
-        aws eks update-kubeconfig \
-          --region "{{ aws_region }}" \
-          --name "{{ cluster_name }}" \
-          --alias "{{ cluster_name }}" \
-          --kubeconfig "$HOME/.kube/config"
-
-        chmod 700 "$HOME/.kube"
-        chmod 600 "$HOME/.kube/config"
-
-        kubectl --kubeconfig "$HOME/.kube/config" config current-context
-      args:
-        executable: /bin/bash
-      register: kubeconfig_output
-      changed_when: false
-
-    - name: Show kubeconfig context
-      ansible.builtin.debug:
-        var: kubeconfig_output.stdout_lines
-
-    - name: Get app ALB hostname if exists
-      ansible.builtin.shell: |
-        set -e
-
-        kubectl --kubeconfig "$HOME/.kube/config" \
+        kubectl --kubeconfig "{{ kubeconfig }}" \
           -n "{{ app_namespace }}" \
           get ingress "{{ app_ingress_name }}" \
           -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true
@@ -70,37 +30,45 @@
       register: alb_hostname
       changed_when: false
 
-    - name: Get Argo CD admin password if initial secret exists
+    - name: Get Argo CD admin password
       ansible.builtin.shell: |
-        kubectl --kubeconfig "$HOME/.kube/config" \
+        kubectl --kubeconfig "{{ kubeconfig }}" \
           -n "{{ argocd_namespace }}" \
           get secret argocd-initial-admin-secret \
-          -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true
+          -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true
       args:
         executable: /bin/bash
       register: argocd_password
       changed_when: false
 
-    - name: Get Grafana admin password if monitoring exists
+    - name: Get Argo CD application status
       ansible.builtin.shell: |
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          -n "{{ monitoring_namespace }}" \
-          get secret "{{ grafana_secret_name }}" \
-          -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null || true
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          -n "{{ argocd_namespace }}" \
+          get application "{{ argocd_app_name }}" \
+          -o jsonpath='Sync={.status.sync.status} Health={.status.health.status}' 2>/dev/null || true
       args:
         executable: /bin/bash
-      register: grafana_password
+      register: argocd_app_status
       changed_when: false
 
-    - name: Print access information
+    - name: Print platform access information
       ansible.builtin.debug:
         msg:
+          - "================ DigiPipeline Access Info ================"
+          - "PROJECT: {{ project_name | default('not-set') }}"
+          - "ENVIRONMENT: {{ environment_name | default('not-set') }}"
+          - "APP NAME: {{ app_name | default('not-set') }}"
+          - "APP NAMESPACE: {{ app_namespace }}"
+          - "APP INGRESS: {{ app_ingress_name }}"
           - "APP URL: {{ 'http://' ~ alb_hostname.stdout if alb_hostname.stdout | length > 0 else 'not-ready-or-not-created-yet' }}"
-          - "ARGO CD URL: https://localhost:8080"
+          - "ARGO CD URL: http://localhost:8080"
           - "ARGO CD USERNAME: admin"
-          - "ARGO CD PASSWORD: {{ argocd_password.stdout if argocd_password.stdout | length > 0 else 'not-found-or-password-changed' }}"
+          - "ARGO CD PASSWORD: {{ argocd_password.stdout if argocd_password.stdout | length > 0 else 'not-ready-or-not-created-yet' }}"
+          - "ARGO CD APP: {{ argocd_app_name }}"
+          - "ARGO CD STATUS: {{ argocd_app_status.stdout if argocd_app_status.stdout | length > 0 else 'not-ready-or-not-created-yet' }}"
           - "GRAFANA URL: http://localhost:3000"
           - "GRAFANA USERNAME: admin"
-          - "GRAFANA PASSWORD: {{ grafana_password.stdout if grafana_password.stdout | length > 0 else 'not-found' }}"
-          - "To open Argo CD/Grafana from LOCAL, run:"
-          - "cd ~/digipipeline-workspace/digipipeline-infra/ansible && ansible-playbook -i inventories/dev/hosts.ini playbooks/open-all-access.yml"
+          - "GRAFANA PASSWORD: admin123"
+          - "PROMETHEUS URL: http://localhost:9090"
+          - "==========================================================="

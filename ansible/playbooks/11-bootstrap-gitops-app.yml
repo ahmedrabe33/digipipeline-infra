@@ -1,5 +1,5 @@
 ---
-- name: Bootstrap DigiPipeline GitOps app in Argo CD
+- name: Bootstrap GitOps application in Argo CD
   hosts: bastion
   gather_facts: false
 
@@ -7,12 +7,7 @@
     - ../inventories/dev/group_vars/all.yml
 
   vars:
-    argocd_namespace: "argocd"
-    app_name: "digipipeline-development"
-    app_namespace: "auraweb-dev"
-    gitops_repo_url: "https://github.com/ahmedrabe33/digipipeline-gitops.git"
-    gitops_target_revision: "main"
-    gitops_app_path: "k8s/overlays/development"
+    kubeconfig: "$HOME/.kube/config"
 
   tasks:
     - name: Check required variables
@@ -20,7 +15,14 @@
         that:
           - aws_region is defined
           - cluster_name is defined
-        fail_msg: "Missing required variables. Run 00-rebuild-infra.yml first."
+          - app_namespace is defined
+          - gitops_repo_url is defined
+          - gitops_branch is defined
+          - gitops_app_path is defined
+          - argocd_namespace is defined
+          - argocd_project is defined
+          - argocd_app_name is defined
+        fail_msg: "Missing reusable project variables. Check inventories/dev/group_vars/all.yml."
 
     - name: Update kubeconfig on Bastion
       ansible.builtin.shell: |
@@ -32,51 +34,51 @@
           --region "{{ aws_region }}" \
           --name "{{ cluster_name }}" \
           --alias "{{ cluster_name }}" \
-          --kubeconfig "$HOME/.kube/config"
+          --kubeconfig "{{ kubeconfig }}"
 
         chmod 700 "$HOME/.kube"
-        chmod 600 "$HOME/.kube/config"
+        chmod 600 "{{ kubeconfig }}"
       args:
         executable: /bin/bash
       changed_when: false
 
-    - name: Delete old demo app from Argo CD
+    - name: Delete old demo app from Argo CD if exists
       ansible.builtin.shell: |
-        kubectl --kubeconfig "$HOME/.kube/config" \
+        kubectl --kubeconfig "{{ kubeconfig }}" \
           -n "{{ argocd_namespace }}" \
           delete application demo-app --ignore-not-found=true
       args:
         executable: /bin/bash
       changed_when: false
 
-    - name: Create target namespace
+    - name: Create target application namespace
       ansible.builtin.shell: |
-        kubectl --kubeconfig "$HOME/.kube/config" \
+        kubectl --kubeconfig "{{ kubeconfig }}" \
           create namespace "{{ app_namespace }}" \
           --dry-run=client -o yaml \
-        | kubectl --kubeconfig "$HOME/.kube/config" apply -f -
+        | kubectl --kubeconfig "{{ kubeconfig }}" apply -f -
       args:
         executable: /bin/bash
 
-    - name: Create DigiPipeline Argo CD Application manifest
+    - name: Create Argo CD Application manifest
       ansible.builtin.copy:
-        dest: /tmp/digipipeline-development-application.yaml
+        dest: "/tmp/{{ argocd_app_name }}-application.yaml"
         mode: "0644"
         content: |
           apiVersion: argoproj.io/v1alpha1
           kind: Application
           metadata:
-            name: {{ app_name }}
-            namespace: {{ argocd_namespace }}
+            name: "{{ argocd_app_name }}"
+            namespace: "{{ argocd_namespace }}"
           spec:
-            project: default
+            project: "{{ argocd_project }}"
             source:
-              repoURL: {{ gitops_repo_url }}
-              targetRevision: {{ gitops_target_revision }}
-              path: {{ gitops_app_path }}
+              repoURL: "{{ gitops_repo_url }}"
+              targetRevision: "{{ gitops_branch }}"
+              path: "{{ gitops_app_path }}"
             destination:
               server: https://kubernetes.default.svc
-              namespace: {{ app_namespace }}
+              namespace: "{{ app_namespace }}"
             syncPolicy:
               automated:
                 prune: true
@@ -85,10 +87,10 @@
                 - CreateNamespace=true
                 - ServerSideApply=true
 
-    - name: Apply DigiPipeline Argo CD Application
+    - name: Apply Argo CD Application
       ansible.builtin.shell: |
-        kubectl --kubeconfig "$HOME/.kube/config" \
-          apply -f /tmp/digipipeline-development-application.yaml
+        kubectl --kubeconfig "{{ kubeconfig }}" \
+          apply -f "/tmp/{{ argocd_app_name }}-application.yaml"
       args:
         executable: /bin/bash
       register: app_apply
@@ -99,7 +101,7 @@
 
     - name: Show Argo CD applications
       ansible.builtin.shell: |
-        kubectl --kubeconfig "$HOME/.kube/config" \
+        kubectl --kubeconfig "{{ kubeconfig }}" \
           -n "{{ argocd_namespace }}" \
           get applications
       args:

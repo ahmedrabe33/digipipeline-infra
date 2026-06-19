@@ -16,7 +16,7 @@ kubernetes_version = "1.35"
 environment = "dev"
 
 ecr_repository_names = [
-  "digipipeline-app"
+   "your-app-image-repo"
 ]
 
 jenkins_controller_instance_type = "t3.medium"

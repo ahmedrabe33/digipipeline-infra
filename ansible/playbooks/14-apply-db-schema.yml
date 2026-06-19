@@ -1,14 +1,27 @@
 ---
-- name: Apply DigiPipeline database schema fixes
+- name: Apply optional application database schema fixes
   hosts: bastion
   gather_facts: false
 
+  vars_files:
+    - ../inventories/dev/group_vars/all.yml
+
   vars:
     kubeconfig: "$HOME/.kube/config"
-    app_namespace: "auraweb-dev"
-    postgres_pod: "postgres-0"
 
   tasks:
+    - name: Show DB schema automation status
+      ansible.builtin.debug:
+        msg:
+          - "DB schema automation enabled: {{ enable_db_schema_automation | bool }}"
+          - "Application namespace: {{ app_namespace }}"
+          - "Postgres pod: {{ postgres_pod }}"
+
+    - name: Skip DB schema automation when disabled
+      ansible.builtin.debug:
+        msg: "Skipping DB schema automation because enable_db_schema_automation is false."
+      when: not (enable_db_schema_automation | bool)
+
     - name: Wait for Postgres pod to be ready
       ansible.builtin.shell: |
         set -e
@@ -20,8 +33,9 @@
       args:
         executable: /bin/bash
       changed_when: false
+      when: enable_db_schema_automation | bool
 
-    - name: Create or fix users and sessions tables
+    - name: Apply AuraWeb-compatible users and sessions schema
       ansible.builtin.shell: |
         set -e
 
@@ -42,27 +56,6 @@
           updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
           last_login TIMESTAMP WITHOUT TIME ZONE
         );
-
-        DO $$
-        BEGIN
-          IF EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'users'
-              AND column_name = 'password'
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'users'
-              AND column_name = 'password_hash'
-          )
-          THEN
-            ALTER TABLE public.users RENAME COLUMN password TO password_hash;
-          END IF;
-        END $$;
 
         ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password_hash TEXT;
         ALTER TABLE public.users ADD COLUMN IF NOT EXISTS name VARCHAR(255);
@@ -90,11 +83,10 @@
       args:
         executable: /bin/bash
       changed_when: false
+      when: enable_db_schema_automation | bool
 
-    - name: Show users table schema
+    - name: Verify users table schema
       ansible.builtin.shell: |
-        set -e
-
         kubectl --kubeconfig "{{ kubeconfig }}" \
           -n "{{ app_namespace }}" \
           exec "{{ postgres_pod }}" -- sh -lc \
@@ -103,24 +95,9 @@
         executable: /bin/bash
       register: users_schema
       changed_when: false
+      when: enable_db_schema_automation | bool
 
     - name: Print users table schema
       ansible.builtin.debug:
         var: users_schema.stdout_lines
-
-    - name: Show sessions table schema
-      ansible.builtin.shell: |
-        set -e
-
-        kubectl --kubeconfig "{{ kubeconfig }}" \
-          -n "{{ app_namespace }}" \
-          exec "{{ postgres_pod }}" -- sh -lc \
-          'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\d sessions"'
-      args:
-        executable: /bin/bash
-      register: sessions_schema
-      changed_when: false
-
-    - name: Print sessions table schema
-      ansible.builtin.debug:
-        var: sessions_schema.stdout_lines
+      when: enable_db_schema_automation | bool
