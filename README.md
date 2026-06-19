@@ -515,6 +515,7 @@ This region hosts the external CI infrastructure.
 
 Main resources in `us-west-2`:
 
+* CI VPC
 * Jenkins controller EC2 instance
 * Jenkins agent EC2 instances
 * Jenkins security groups
@@ -652,6 +653,9 @@ digipipeline-infra/
 |       |
 |       |-- backend.tf
 |       |-- main.tf
+|       |-- ci.tf
+|       |-- ci-variables.tf
+|       |-- ci-outputs.tf
 |       |-- provider.tf
 |       |-- variable.tf
 |       |-- outputs.tf
@@ -664,6 +668,7 @@ digipipeline-infra/
 |           |-- eks/
 |           |-- bastion/
 |           |-- karpenter/
+|           |-- ci-vpc/
 |           |-- ecr/
 |           |-- jenkins/
 |       |
@@ -684,6 +689,14 @@ digipipeline-infra/
 
 Terraform provisions the AWS infrastructure.
 
+The Terraform root module is split across multiple `.tf` files.
+
+`main.tf` provisions the core EKS platform resources such as VPC, IAM, EKS, Bastion, and Karpenter.
+
+`ci.tf` provisions the CI resources such as Amazon ECR repositories, Jenkins controller, Jenkins agents, and CI networking.
+
+`ci-outputs.tf` exposes the Jenkins and ECR outputs consumed by Ansible during the rebuild automation.
+
 Terraform creates:
 
 * VPC
@@ -695,6 +708,7 @@ Terraform creates:
 * Managed node group
 * IAM roles and policies
 * Bastion host
+* CI VPC
 * Jenkins controller
 * Jenkins agents
 * Amazon ECR repositories
@@ -1050,7 +1064,15 @@ Update image tag in GitOps repository
 Argo CD syncs the application to EKS
 ```
 
-After the Jenkins build finishes, verify the deployment:
+After the Jenkins build finishes, verify the deployment.
+
+First, load your `.env` variables if they are not already loaded:
+
+```bash
+set -a && source .env && set +a
+```
+
+Then run:
 
 ```bash
 cd ansible
@@ -1230,6 +1252,8 @@ Jenkins is configured through Ansible automation.
 
 The project does not require manually adding Jenkins agents after every rebuild.
 
+Terraform creates the Jenkins controller and agent EC2 instances, while Ansible installs and configures Jenkins on top of them.
+
 Ansible handles:
 
 * Jenkins controller installation
@@ -1331,6 +1355,12 @@ Do not delete the backend S3 bucket or DynamoDB lock table unless you intentiona
 ---
 
 ## Useful Commands
+
+Before using commands that depend on `.env` variables, load them first:
+
+```bash
+set -a && source .env && set +a
+```
 
 ### Check EKS Nodes
 
